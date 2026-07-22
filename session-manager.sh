@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================================
 # Claude 세션 매니저 (csm) — tmux 컨트롤 패널 겸 실시간 대시보드
-#  표시: 창별 프로필 / 상태(🟢작업 🟡한도대기 ⛔차단 ⚪유휴) / 사용량 잔량 /
+#  표시: 창별 프로필 / 상태(🟢작업 🔵백그라운드 🟡한도대기 ⛔차단 ⚪유휴) / 사용량 잔량 /
 #        resets 카운트다운 / 자동주입 이력 / ⏸자동재개 제외
-#  키:  a 접속(창 선택)  n 새 세션  k 세션 종료  p 자동재개 토글
-#       r 새로고침  q 종료
+#  키:  a 접속(창 선택)  n 새 세션  k 세션 종료  p 자동재개 토글  t 알림 설정
+#       l 언어 토글  r 새로고침  q 종료
 # ============================================================================
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -160,7 +160,7 @@ ensure_session_and_window() {  # name cmd
   local nn="$1" cmd="$2"
   if ! $T has-session -t "$TMUX_SESSION" 2>/dev/null; then
     $T new-session -d -s "$TMUX_SESSION" -n "$nn" -c "$PWD"
-  elif $T list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$nn"; then
+  elif $T list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qxF "$nn"; then
     printf "  $(t win_exists)\n" "$nn"; return 1
   else
     $T new-window -t "$TMUX_SESSION" -n "$nn" -c "$PWD"
@@ -201,8 +201,10 @@ action_new() {
     for i in "${!MENU[@]}"; do printf "    %d) %s\n" "$((i+1))" "${MENU[$i]}"; done
     printf "  $(t new_num)"; read_esc || { printf "  $(t cancel)\n"; return; }
     local n2="${REPLY:-1}"
-    case "$n2" in ''|*[!0-9]*) cmd="${MENU[0]}" ;;
-      *) cmd="${MENU[$((n2-1))]:-${MENU[0]}}" ;; esac
+    case "$n2" in
+      ''|*[!0-9]*) cmd="${MENU[0]}" ;;
+      *) [ "$n2" -ge 1 ] && [ "$n2" -le "${#MENU[@]}" ] && cmd="${MENU[$((n2-1))]}" || cmd="${MENU[0]}" ;;
+    esac
   fi
   printf "  $(t new_args)"
   read_esc || { printf "  $(t cancel)\n"; return; }

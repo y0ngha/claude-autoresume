@@ -22,6 +22,15 @@ else
   printf "$(t in_tmux_get)\n"; brew install tmux; printf "$(t in_tmux_done)\n"
 fi
 
+# 1b) coreutils(gtimeout) — 데몬이 멈춘 tmux 에 무한 대기하지 않게. 없어도 동작(best-effort).
+if ! command -v gtimeout >/dev/null 2>&1 && ! command -v timeout >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    printf "$(t in_coreutils_get)\n"; brew install coreutils >/dev/null 2>&1 || printf "$(t in_coreutils_skip)\n"
+  else
+    printf "$(t in_coreutils_skip)\n"
+  fi
+fi
+
 # 2) 실행권한 + 언어 파일(csm [l] 로 토글, 데몬도 공유). 이미 있으면 보존.
 chmod +x "$DIR/autoresume.sh" "$DIR/session-manager.sh" 2>/dev/null || true
 mkdir -p "$DIR/state"
@@ -48,11 +57,13 @@ cat > "$PLIST" <<PLIST_EOF
 </dict></plist>
 PLIST_EOF
 launchctl bootout "gui/$MYUID/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$MYUID" "$PLIST"
+sleep 1   # bootout 이 비동기라 바로 bootstrap 하면 간헐적 'Bootstrap failed: 5'
+launchctl bootstrap "gui/$MYUID" "$PLIST" || true
 sleep 1
 printf "$(t in_daemon)\n" "$(launchctl list | grep "$LABEL" || t in_daemon_fail)"
 
-# 4) .zshrc 에 셸 함수 source 추가
+# 4) .zshrc 에 셸 함수 source 추가 (셸 함수는 zsh 전용)
+case "${SHELL:-}" in *zsh) ;; *) printf "$(t in_not_zsh)\n" "${SHELL:-?}" ;; esac
 SRC_LINE="source \"$DIR/shell-functions.zsh\""
 if grep -qF "$DIR/shell-functions.zsh" "$HOME/.zshrc" 2>/dev/null; then
   printf "$(t in_zsh_have)\n"

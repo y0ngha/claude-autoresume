@@ -34,7 +34,8 @@ DISABLED_LIST="$_CFG_DIR/disabled.list"
 # ── 한도 문구 3분류 (대소문자 무시) ─────────────────────────────────────────
 # (A) RESUME_REGEX : 자동 이어가기 대상. 5h 세션 한도 → resets 후 풀림.
 #     예) "You've hit your session limit · resets 1:40pm (Asia/Seoul)"
-RESUME_REGEX="you'?ve hit your session limit|5-hour limit reached|session limit reached"
+# 마지막 항목은 메뉴 '선택 후' 남는 문구까지 잡기 위한 안전망(활성 메뉴는 메뉴 처리가 우선).
+RESUME_REGEX="you'?ve hit your session limit|5-hour limit reached|session limit reached|stop and wait for limit to reset"
 # (B) BLOCKED_NOAUTO_REGEX : 차단이지만 자동재개 무의미(관리자/장기 대기). 감지+알림만.
 #     예) "You've hit your org's monthly spend limit · run /usage-credits ..."
 BLOCKED_NOAUTO_REGEX="hit your org'?s monthly spend limit|monthly spend limit|weekly limit|7-day limit"
@@ -58,7 +59,7 @@ BACKGROUND_REGEX="[0-9]+ shells? still running|· [0-9]+ shell|running in the ba
 # (화면 해시 변화만으로 판정하면 프롬프트 타이핑·/status 등도 작업중으로 오판되므로,
 #  Claude TUI 가 생성 중에만 보여주는 'esc to interrupt' 스피너 문구를 앵커로 사용.)
 # Claude 버전에 따라 문구가 바뀌면 이 한 줄만 맞춰주면 됩니다.
-WORKING_REGEX="esc to interrupt|escape to interrupt|to interrupt\)"
+WORKING_REGEX="esc to interrupt|escape to interrupt"
 
 # ── statusline 파싱 패턴 (커스텀 statusline 전용, 없으면 자동 생략) ──────────
 # 사용자의 /rc 등 커스텀 statusline 예: "5h 0% left / 7d 11% left"
@@ -79,7 +80,9 @@ NOTIFY_IDLE=1         # → ⚪ 유휴(완료/입력대기) 전환 시
 INTERVAL=60           # 감시 주기(초). 짧을수록 리셋 직후 빨리 이어감(capture라 비용 무시)
 MIN_RESEND_GAP=540    # 같은 창 재주입/재알림 최소 간격(초)
 RESET_BUFFER=30       # resets 시각 + 이 여유(초) 뒤부터 주입
-CAPTURE_LINES=15      # 화면 하단 몇 줄 보고 판단할지(작을수록 옛 문구 오판 적음)
+CAPTURE_LINES=40      # 화면 하단 몇 줄 보고 판단할지. 너무 작으면 한도문구가 스크롤아웃돼
+                      # 재개 실패(에이전트 트리 등 아래 내용 많을 때 배너가 25줄 밖으로 밀림).
+                      # 작업중은 esc-to-interrupt 가 우선 판정되므로 크게 잡아도 오판 적음.
 
 export TMUX_TMPDIR="${TMUX_TMPDIR:-/tmp}"   # launchd 데몬과 tmux 소켓 공유
 
@@ -138,6 +141,8 @@ reset_epoch() {
   [ -z "$raw" ] && return 0
   hour="$(printf '%s' "$raw" | grep -oE '^[0-9]{1,2}')"; [ -z "$hour" ] && return 0
   min="$(printf '%s' "$raw" | grep -oE ':[0-9]{2}' | tr -d ':')"; min="${min:-00}"
+  # 10진수 강제: bash 3.2 는 08/09 를 8진수로 오인해 산술/printf 가 깨짐(리셋 시각 오차)
+  hour=$((10#$hour)); min=$((10#$min))
   ampm="$(printf '%s' "$raw" | grep -oE '[AP]M')"
   [ "$ampm" = PM ] && [ "$hour" != 12 ] && hour=$((hour+12))
   [ "$ampm" = AM ] && [ "$hour" = 12 ] && hour=0

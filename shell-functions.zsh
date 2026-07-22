@@ -28,7 +28,7 @@ cbg() {
   if ! $_CAR_TMUX has-session -t claude 2>/dev/null; then
     $_CAR_TMUX new-session -d -s claude -n "$name" -c "$dir"
   else
-    if $_CAR_TMUX list-windows -t claude -F '#{window_name}' 2>/dev/null | grep -qx "$name"; then
+    if $_CAR_TMUX list-windows -t claude -F '#{window_name}' 2>/dev/null | grep -qxF "$name"; then
       printf "$(_carmsg sh_win_exists)\n" "$name" "$name"; return 1
     fi
     $_CAR_TMUX new-window -t claude -n "$name" -c "$dir"

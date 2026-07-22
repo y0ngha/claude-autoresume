@@ -18,8 +18,19 @@ LOG="$DIR/autoresume.log"
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
-notify() { osascript -e "display notification \"$2\" with title \"$1\" sound name \"${3:-Glass}\"" 2>/dev/null; }
 tf() { printf "$(t "$1")" "${@:2}"; }   # i18n 포맷 헬퍼: tf <key> [args...]
+
+# tmux/osascript 가 멈춰도 데몬 루프 전체가 무한 대기하지 않도록 감쌈.
+# macOS 기본엔 timeout 이 없음 → `brew install coreutils`(gtimeout) 있으면 자동 사용, 없으면 그냥 실행.
+_TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+_t() { local s="$1"; shift; if [ -n "$_TIMEOUT_BIN" ]; then "$_TIMEOUT_BIN" "$s" "$@"; else "$@"; fi; }
+# 상태 파일에서 정수 타임스탬프 읽기. 없거나 손상(비숫자)이면 0 → set -u 산술 크래시/크래시루프 방지.
+_num() { local v; v="$(cat "$1" 2>/dev/null)"; case "$v" in ''|*[!0-9]*) echo 0 ;; *) echo "$v" ;; esac; }
+
+notify() {  # title body [sound]. " 와 \ 를 이스케이프해 AppleScript 깨짐/주입 방지.
+  local ti bo; ti="$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')"; bo="$(printf '%s' "$2" | sed 's/[\\"]/\\&/g')"
+  _t 8 osascript -e "display notification \"$bo\" with title \"$ti\" sound name \"${3:-Glass}\"" 2>/dev/null
+}
 
 # 로그 무한 증가 방지: 1MB 넘으면 최근 800줄만 남김(24/7 운영 대비)
 LOG_MAX_BYTES=1048576
@@ -30,7 +41,7 @@ rotate_log() {
 # 닫힌 창(현재 window index 목록에 없는)에 대한 상태파일 정리
 prune_orphans() {
   local live f base idx
-  live="$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}' 2>/dev/null)"
+  live="$(_t 8 tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}' 2>/dev/null)"
   [ -z "$live" ] && return
   for f in "$STATE/${TMUX_SESSION}-"*; do
     [ -e "$f" ] || continue
@@ -40,7 +51,6 @@ prune_orphans() {
   done
 }
 
-log "$(tf lg_start "$TMUX_SESSION" "$INTERVAL" "$MIN_RESEND_GAP")"
 
 # 상태 '전이' 알림: 창 상태가 안정적으로 바뀌면 그 상태의 NOTIFY_* 플래그에 따라 1회 알림.
 #   상태(classify): working|background|limit|blocked|idle
@@ -51,7 +61,7 @@ notify_transition() {
   local nf="$STATE/${TMUX_SESSION}-${idx}.pnotified"
   local last cnt notified flag emoji sound
   last="$(cat "$lf" 2>/dev/null || echo)"; echo "$cur" > "$lf"
-  cnt="$(cat "$cf" 2>/dev/null || echo 0)"
+  cnt="$(_num "$cf")"
   notified="$(cat "$nf" 2>/dev/null || echo)"
   if [ "$cur" != "$last" ]; then echo 0 > "$cf"; return; fi   # 아직 바뀌는 중 → 안정 대기
   cnt=$((cnt+1)); echo "$cnt" > "$cf"
@@ -73,10 +83,10 @@ notify_transition() {
 
 scan_once() {
   rotate_log
-  if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+  if ! _t 8 tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     # 세션이 없을 때 매 스캔마다 찍으면 로그가 폭증하므로 5분에 한 번만 기록.
     local nf="$STATE/.nosession" nlast now2
-    nlast=0; [ -f "$nf" ] && nlast="$(cat "$nf" 2>/dev/null || echo 0)"
+    nlast="$(_num "$nf")"
     now2="$(date +%s)"
     if [ $(( now2 - nlast )) -ge 300 ]; then echo "$now2" > "$nf"; log "$(tf lg_no_session "$TMUX_SESSION")"; fi
     return
@@ -87,7 +97,7 @@ scan_once() {
     # window_index 는 항상 숫자. 아니면(탭 파싱 깨짐 등) 잘못된 행 → 스킵.
     case "$idx" in ''|*[!0-9]*) continue ;; esac
     target="$TMUX_SESSION:$idx"
-    content="$(tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
+    content="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
     # capture 실패/빈 화면이면 오판하지 않도록 스킵.
     [ -z "$content" ] && continue
     now="$(date +%s)"
@@ -101,7 +111,7 @@ scan_once() {
     # 한도대기 상태에서만 자동재개(선택/주입). 제외 창은 스킵(알림은 위에서 이미 처리).
     if is_disabled "$name"; then
       ef="$STATE/${TMUX_SESSION}-${idx}.excllog"
-      elast=0; [ -f "$ef" ] && elast="$(cat "$ef" 2>/dev/null || echo 0)"
+      elast="$(_num "$ef")"
       if [ $(( now - elast )) -ge "$MIN_RESEND_GAP" ]; then
         echo "$now" > "$ef"; log "$(tf lg_excluded "$target" "$name")"
       fi
@@ -112,12 +122,12 @@ scan_once() {
     #     선택만으로는 재개되지 않으므로, 이후 리셋이 지나면 (2)에서 주입이 이어짐.
     if printf '%s' "$content" | match_limit_menu; then
       mf="$STATE/${TMUX_SESSION}-${idx}.menu"
-      mlast=0; [ -f "$mf" ] && mlast="$(cat "$mf" 2>/dev/null || echo 0)"
+      mlast="$(_num "$mf")"
       if [ $(( now - mlast )) -ge "$MIN_RESEND_GAP" ]; then
         echo "$now" > "$mf"
-        tmux send-keys -t "$target" Up Up      # 커서를 최상단(1번)으로
+        _t 8 tmux send-keys -t "$target" Up Up      # 커서를 최상단(1번)으로
         sleep 0.3
-        tmux send-keys -t "$target" Enter      # 확정
+        _t 8 tmux send-keys -t "$target" Enter      # 확정
         log "$(tf lg_menu "$target" "$name")"
       fi
       continue
@@ -125,7 +135,7 @@ scan_once() {
 
     # (2) 텍스트형 세션 한도 → resets 시각 지나면 CONTINUE_PROMPT 주입(제자리 재개).
     sf="$STATE/${TMUX_SESSION}-${idx}.last"
-    last=0; [ -f "$sf" ] && last="$(cat "$sf" 2>/dev/null || echo 0)"
+    last="$(_num "$sf")"
     rep="$(printf '%s' "$content" | reset_epoch)"
     case "$rep" in
       PASSED) waiting=0; lbl="$(t lbl_passed)" ;;
@@ -134,22 +144,33 @@ scan_once() {
     esac
     if [ "$waiting" = 1 ]; then
       wf="$STATE/${TMUX_SESSION}-${idx}.waitlog"
-      wlast=0; [ -f "$wf" ] && wlast="$(cat "$wf" 2>/dev/null || echo 0)"
+      wlast="$(_num "$wf")"
       if [ $(( now - wlast )) -ge 300 ]; then
         echo "$now" > "$wf"
         log "$(tf lg_waiting "$target" "$(date -r "$rep" '+%H:%M')" "$name")"
       fi
     elif [ $(( now - last )) -ge "$MIN_RESEND_GAP" ]; then
-      tmux send-keys -t "$target" -l "$CONTINUE_PROMPT"
-      sleep 1
-      tmux send-keys -t "$target" Enter
-      echo "$now" > "$sf"
-      log "$(tf lg_inject "$lbl" "$target" "$name")"
+      # 주입 성공(send-keys 성공)일 때만 .last 기록 → 실패 시 다음 스캔에 재시도.
+      if _t 8 tmux send-keys -t "$target" -l "$CONTINUE_PROMPT"; then
+        sleep 1
+        _t 8 tmux send-keys -t "$target" Enter
+        echo "$now" > "$sf"
+        log "$(tf lg_inject "$lbl" "$target" "$name")"
+      else
+        log "$(tf lg_inject_fail "$target" "$name")"
+      fi
     else
       log "$(tf lg_gap "$target")"
     fi
-  done < <(tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}	#{window_name}' 2>/dev/null)
+  done < <(_t 8 tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}	#{window_name}' 2>/dev/null)
+}
+
+# 상시 감시 루프를 함수로 감싸 '한 번에 파싱'되게 함. 이렇게 하면 실행 중에 이 파일이
+# 편집돼도 bash 가 루프 본문을 중간부터 재읽기해 깨지는 일이 없음(라이브 편집 안전).
+main() {
+  log "$(tf lg_start "$TMUX_SESSION" "$INTERVAL" "$MIN_RESEND_GAP")"   # 시작 로그는 여기서만
+  while true; do scan_once; sleep "$INTERVAL"; done
 }
 
 if [ "${1:-}" = "--once" ]; then scan_once; exit 0; fi
-while true; do scan_once; sleep "$INTERVAL"; done
+main
