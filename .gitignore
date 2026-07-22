@@ -1,0 +1,10 @@
+# 런타임/개인 흔적 — 저장소에 올리지 않음
+state/
+.sm/
+disabled.list
+lang
+notify.conf
+*.log
+
+# macOS
+.DS_Store
