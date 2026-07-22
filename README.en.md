@@ -179,7 +179,7 @@ An alert only fires when the state holds steady for two checks in a row, which a
 | `INTERVAL` | 60 | check interval, seconds |
 | `MIN_RESEND_GAP` | 540 | minimum gap before sending or alerting the same window again, seconds |
 | `RESET_BUFFER` | 30 | send this many seconds after the reset time |
-| `CAPTURE_LINES` | 40 | how many bottom lines to judge from |
+| `CAPTURE_LINES` | 20 | how many bottom lines to judge from |
 
 After changing a value, apply it with `launchctl kickstart -k gui/$(id -u)/com.claude-autoresume`.
 

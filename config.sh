@@ -80,9 +80,9 @@ NOTIFY_IDLE=1         # → ⚪ 유휴(완료/입력대기) 전환 시
 INTERVAL=60           # 감시 주기(초). 짧을수록 리셋 직후 빨리 이어감(capture라 비용 무시)
 MIN_RESEND_GAP=540    # 같은 창 재주입/재알림 최소 간격(초)
 RESET_BUFFER=30       # resets 시각 + 이 여유(초) 뒤부터 주입
-CAPTURE_LINES=40      # 화면 하단 몇 줄 보고 판단할지. 너무 작으면 한도문구가 스크롤아웃돼
-                      # 재개 실패(에이전트 트리 등 아래 내용 많을 때 배너가 25줄 밖으로 밀림).
-                      # 작업중은 esc-to-interrupt 가 우선 판정되므로 크게 잡아도 오판 적음.
+CAPTURE_LINES=20      # 화면 하단 몇 줄 보고 판단할지. 진짜 멈춘 한도배너는 하단 ~17줄
+                      # 이내에 있음. 너무 크게 잡으면 재개 후 위로 밀려난 옛 배너를 다시 잡아
+                      # limit 로 오판(잘못된 재주입). background-먼저 순서와 함께 오판을 막음.
 
 export TMUX_TMPDIR="${TMUX_TMPDIR:-/tmp}"   # launchd 데몬과 tmux 소켓 공유
 
@@ -105,14 +105,17 @@ match_limit_menu() {
     && printf '%s' "$c" | grep -qiE "$LIMIT_MENU_ACTIVE"
 }
 
-# 화면 내용(stdin)을 단일 상태로 분류(csm·데몬 공용):
-#   working | blocked | limit | background | idle   (우선순위 순서)
+# 화면 내용(stdin)을 단일 상태로 분류(csm·데몬 공용). 우선순위 순서:
+#   working | blocked | background | limit | idle
+# background 를 limit 보다 먼저 보는 이유: 재개 후 계속 작업 중인데 옛 한도 배너가
+# 화면에 남아 있으면 limit 로 오판해 잘못 재주입할 수 있음. 백그라운드 작업이 돌고 있으면
+# 아직 '멈춘 한도'가 아니므로 background 로 본다. 진짜 멈춘 한도는 background 신호가 없다.
 classify() {
   local c; c="$(cat)"
   if   printf '%s' "$c" | match_working;    then printf working
   elif printf '%s' "$c" | match_blocked;    then printf blocked
-  elif printf '%s' "$c" | match_resume || printf '%s' "$c" | match_limit_menu; then printf limit
   elif printf '%s' "$c" | match_background; then printf background
+  elif printf '%s' "$c" | match_resume || printf '%s' "$c" | match_limit_menu; then printf limit
   else printf idle; fi
 }
 
