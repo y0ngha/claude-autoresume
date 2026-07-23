@@ -36,9 +36,16 @@ DISABLED_LIST="$_CFG_DIR/disabled.list"
 #     예) "You've hit your session limit · resets 1:40pm (Asia/Seoul)"
 # 마지막 항목은 메뉴 '선택 후' 남는 문구까지 잡기 위한 안전망(활성 메뉴는 메뉴 처리가 우선).
 RESUME_REGEX="you'?ve hit your session limit|5-hour limit reached|session limit reached|stop and wait for limit to reset"
-# (B) BLOCKED_NOAUTO_REGEX : 차단이지만 자동재개 무의미(관리자/장기 대기). 감지+알림만.
+# (B) BLOCKED_NOAUTO_REGEX : 차단이며 자동재개 무의미(장기 대기). 감지+알림만.
+#     주간/7일 한도가 여기 해당(리셋이 멀어 이어가도 의미 없음).
+BLOCKED_NOAUTO_REGEX="weekly limit|7-day limit"
+# (B') ORG_LIMIT_REGEX : 기업(org) 계정 전용. 기업 계정은 '개인 5시간 한도'도 이 문구로
+#     뜨며(리셋 시각이 화면에 없음), 진짜 월 결제 한도인지 5시간 한도인지 문구만으론
+#     구분되지 않는다. 그래서 즉시 차단하지 않고 5시간 뒤 1회 재시도한 뒤(autoresume.sh
+#     의 orglimit 상태머신), 그래도 같은 문구가 남으면 그때 차단으로 본다.
 #     예) "You've hit your org's monthly spend limit · run /usage-credits ..."
-BLOCKED_NOAUTO_REGEX="hit your org'?s monthly spend limit|monthly spend limit|weekly limit|7-day limit"
+#     개인 계정에는 이 문구가 뜨지 않으므로, 이 규칙이 개인/기업 처리를 자연히 분리한다.
+ORG_LIMIT_REGEX="hit your org'?s monthly spend limit|monthly spend limit"
 # (C) IGNORE_REGEX : 차단 아닌 예고성 경고 → 무시. 예) "You've used 97% of ..."
 IGNORE_REGEX="used [0-9]{1,3}% of|approaching"
 # (D) 한도 도달 시 뜨는 대화형 선택 메뉴 → 데몬이 "Stop and wait for limit to reset"(1번)
@@ -80,6 +87,9 @@ NOTIFY_IDLE=1         # → ⚪ 유휴(완료/입력대기) 전환 시
 INTERVAL=60           # 감시 주기(초). 짧을수록 리셋 직후 빨리 이어감(capture라 비용 무시)
 MIN_RESEND_GAP=540    # 같은 창 재주입/재알림 최소 간격(초)
 RESET_BUFFER=30       # resets 시각 + 이 여유(초) 뒤부터 주입
+ORG_RETRY_DELAY=18000 # 기업 한도(orglimit): 처음 감지 후 이 시간(초, 기본 5시간) 뒤 1회
+                      # 재시도. 그래도 같은 문구면 차단으로 본다. (기업 계정은 5시간 한도도
+                      # org 문구로 뜨므로, 5시간 지나 재시도하면 실제 5시간 한도는 풀린다.)
 CAPTURE_LINES=20      # 화면 하단 몇 줄 보고 판단할지. 진짜 멈춘 한도배너는 하단 ~17줄
                       # 이내에 있음. 너무 크게 잡으면 재개 후 위로 밀려난 옛 배너를 다시 잡아
                       # limit 로 오판(잘못된 재주입). background-먼저 순서와 함께 오판을 막음.
@@ -113,6 +123,7 @@ NEW_SESSION_MENU=( "claude" )
 # ── 공용 판정 헬퍼 (stdin = 화면 내용) ──────────────────────────────────────
 match_resume()     { grep -iE "$RESUME_REGEX"         2>/dev/null | grep -ivE "$IGNORE_REGEX" | grep -q .; }
 match_blocked()    { grep -iE "$BLOCKED_NOAUTO_REGEX" 2>/dev/null | grep -ivE "$IGNORE_REGEX" | grep -q .; }
+match_orglimit()   { grep -iE "$ORG_LIMIT_REGEX"      2>/dev/null | grep -ivE "$IGNORE_REGEX" | grep -q .; }
 match_background() { grep -qiE "$BACKGROUND_REGEX" 2>/dev/null; }
 match_working()    { grep -qiE "$WORKING_REGEX" 2>/dev/null; }
 # 활성 한도 메뉴: 옵션 문구 + 확정 프롬프트가 함께 있을 때만 참(선택 후 잔여문구 제외)
@@ -123,21 +134,23 @@ match_limit_menu() {
 }
 
 # 화면 내용(stdin)을 단일 상태로 분류(csm·데몬 공용). 우선순위 순서:
-#   working | limit(활성 메뉴) | blocked | background | limit(텍스트) | idle
+#   working | limit(활성 메뉴) | blocked | orglimit | background | limit(텍스트) | idle
 # · 활성 한도 메뉴(match_limit_menu: 'Enter to confirm · Esc to cancel' 가 함께 뜬 열린
-#   메뉴)는 지금 당장 처리해야 할 live 프롬프트라 blocked/background 보다 먼저 본다.
-#   서브에이전트 실패 메시지에 'monthly spend limit' 같은 문구가 남아 blocked 로 걸리거나
-#   'Waiting for N background agents' 로 background 로 걸려도, 실제 눌러야 할 메뉴가 떠
-#   있으면 그 메뉴 선택이 우선이어야 하기 때문.
-# · 반대로 텍스트형 한도(match_resume)는 background 보다 뒤에 본다: 재개 후 작업 중인데
-#   옛 한도 배너가 화면에 남아 있으면 limit 로 오판해 잘못 재주입할 수 있으므로, 백그라운드
-#   신호가 있으면 아직 '멈춘 한도'가 아니라 background 로 본다. 활성 메뉴는 잔여 배너와
-#   달리 확정 프롬프트가 함께 떠 있을 때만 참이라 이 오판 위험이 없다.
+#   메뉴)는 지금 당장 처리해야 할 live 프롬프트라 blocked/orglimit/background 보다 먼저 본다.
+#   서브에이전트 실패 메시지에 'monthly spend limit' 같은 문구가 남아 있어도, 실제 눌러야
+#   할 메뉴가 떠 있으면 그 메뉴 선택이 우선이어야 하기 때문.
+# · orglimit(기업 월 결제 한도 문구)은 background 보다 먼저 본다: 재시도가 5시간 뒤에야
+#   일어나므로(느린 동작), 잔여 문구가 잠깐 보였다 사라지면 그 전에 상태가 바뀌어 재시도
+#   타이머가 리셋된다. 즉 5시간 타이머 자체가 옛 문구 오판을 막아준다.
+# · 반대로 텍스트형 한도(match_resume)는 즉시 주입하는 빠른 동작이라 background 보다 뒤에
+#   본다: 재개 후 작업 중인데 옛 한도 배너가 남아 있으면 잘못 재주입할 수 있으므로, 백그라운드
+#   신호가 있으면 아직 '멈춘 한도'가 아니라 background 로 본다.
 classify() {
   local c; c="$(cat)"
   if   printf '%s' "$c" | match_working;     then printf working
   elif printf '%s' "$c" | match_limit_menu;  then printf limit
   elif printf '%s' "$c" | match_blocked;     then printf blocked
+  elif printf '%s' "$c" | match_orglimit;    then printf orglimit
   elif printf '%s' "$c" | match_background;  then printf background
   elif printf '%s' "$c" | match_resume;      then printf limit
   else printf idle; fi

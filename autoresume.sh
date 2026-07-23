@@ -26,6 +26,13 @@ _TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/nul
 _t() { local s="$1"; shift; if [ -n "$_TIMEOUT_BIN" ]; then "$_TIMEOUT_BIN" "$s" "$@"; else "$@"; fi; }
 # 상태 파일에서 정수 타임스탬프 읽기. 없거나 손상(비숫자)이면 0 → set -u 산술 크래시/크래시루프 방지.
 _num() { local v; v="$(cat "$1" 2>/dev/null)"; case "$v" in ''|*[!0-9]*) echo 0 ;; *) echo "$v" ;; esac; }
+# 창 하나($1=window_index)의 기업 한도(orglimit) 재시도 상태 파일을 모두 제거.
+clear_org_state() {
+  rm -f "$STATE/${TMUX_SESSION}-$1.orgfirst" \
+        "$STATE/${TMUX_SESSION}-$1.orgretried" \
+        "$STATE/${TMUX_SESSION}-$1.orgblocked" \
+        "$STATE/${TMUX_SESSION}-$1.orgwaitlog" 2>/dev/null
+}
 
 notify() {  # title body [sound]. " 와 \ 를 이스케이프해 AppleScript 깨짐/주입 방지.
   local ti bo; ti="$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')"; bo="$(printf '%s' "$2" | sed 's/[\\"]/\\&/g')"
@@ -72,6 +79,7 @@ notify_transition() {
     working)    flag="${NOTIFY_WORKING:-0}";    emoji="🟢"; sound="Glass" ;;
     background) flag="${NOTIFY_BACKGROUND:-0}";  emoji="🔵"; sound="Glass" ;;
     limit)      flag="${NOTIFY_LIMIT:-0}";       emoji="🟡"; sound="Basso" ;;
+    orglimit)   flag="${NOTIFY_LIMIT:-0}";       emoji="🟠"; sound="Basso" ;;
     blocked)    flag="${NOTIFY_BLOCKED:-0}";     emoji="⛔"; sound="Basso" ;;
     idle)       flag="${NOTIFY_IDLE:-0}";        emoji="✅"; sound="Glass" ;;
     *) return ;;
@@ -106,12 +114,61 @@ scan_once() {
     [ -z "$name" ] && continue
     target="$TMUX_SESSION:$idx"
     content="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
-    # capture 실패/빈 화면이면 오판하지 않도록 스킵.
-    [ -z "$content" ] && continue
     now="$(date +%s)"
+    # capture 실패/빈 화면(프롬프트가 위에 있고 하단이 비었을 때 포함)이면 상태 판정을 건너뛴다.
+    # 단, 빈 화면은 'org 한도 아님'이 확실하므로 org 재시도 상태는 정리한다. 그래야 예전
+    # .orgretried 가 남아 나중에 같은 창이 다시 한도에 걸렸을 때 5시간 대기 없이 즉시
+    # 차단되는 일이 없다.
+    if [ -z "$content" ]; then clear_org_state "$idx"; continue; fi
 
     state="$(printf '%s' "$content" | classify)"
     notify_transition "$idx" "$name" "$state"     # 상태 전이 알림(플래그별)
+
+    # 기업 한도(orglimit) 가 아닌 상태로 바뀌면 org 재시도 상태를 리셋한다(재개/전이 시).
+    # 재개에 성공하면 org 문구가 사라져 다른 상태가 되므로 여기서 자연히 초기화된다.
+    [ "$state" != orglimit ] && clear_org_state "$idx"
+
+    # 기업(org) 월 결제 한도: 개인 5시간 한도와 달리 리셋 시각이 화면에 없고, 5시간 한도도
+    # 이 문구로 뜬다. 즉시 차단하지 않고 처음 감지 후 ORG_RETRY_DELAY(기본 5시간) 뒤 1회
+    # CONTINUE_PROMPT 를 주입해 재시도한다. 그래도 같은 문구가 남으면 그때 차단으로 본다.
+    if [ "$state" = orglimit ]; then
+      is_disabled "$name" && continue     # 제외 창은 손대지 않음(알림은 위에서 처리)
+      off="$STATE/${TMUX_SESSION}-${idx}.orgfirst"
+      orf="$STATE/${TMUX_SESSION}-${idx}.orgretried"
+      obf="$STATE/${TMUX_SESSION}-${idx}.orgblocked"
+      ofirst="$(_num "$off")"; rtried="$(_num "$orf")"
+      if [ "$rtried" -gt 0 ]; then
+        # 이미 1회 재시도했는데도 org 문구가 계속/다시 뜸 → 진짜 차단. 알림·로그는 gap 간격 1회.
+        oblast="$(_num "$obf")"
+        if [ $(( now - oblast )) -ge "$MIN_RESEND_GAP" ]; then
+          echo "$now" > "$obf"
+          log "$(tf lg_orgblocked "$target" "$name")"
+          [ "${NOTIFY_BLOCKED:-0}" = 1 ] && notify "$(t ntf_orgblocked_title)" "$(tf ntf_orgblocked_body "$name")" Basso
+        fi
+      elif [ "$ofirst" -eq 0 ]; then
+        echo "$now" > "$off"                # 처음 감지 → 타이머 시작
+        log "$(tf lg_orgseen "$target" "$name")"
+      elif [ $(( now - ofirst )) -ge "$ORG_RETRY_DELAY" ]; then
+        # 감지 후 5시간 경과 → 1회 재시도(주입 성공 시에만 재시도 기록).
+        if _t 8 tmux send-keys -t "$target" -l "$CONTINUE_PROMPT"; then
+          sleep 1
+          _t 8 tmux send-keys -t "$target" Enter
+          echo "$now" > "$orf"
+          log "$(tf lg_orgretry "$target" "$name")"
+        else
+          log "$(tf lg_inject_fail "$target" "$name")"
+        fi
+      else
+        # 재시도까지 대기 중. 로그는 5분에 한 번만.
+        owf="$STATE/${TMUX_SESSION}-${idx}.orgwaitlog"
+        owlast="$(_num "$owf")"
+        if [ $(( now - owlast )) -ge 300 ]; then
+          echo "$now" > "$owf"
+          log "$(tf lg_orgwait "$target" "$(date -r $((ofirst + ORG_RETRY_DELAY)) '+%H:%M')" "$name")"
+        fi
+      fi
+      continue
+    fi
 
     # limit 외 상태(working/background/idle/blocked)는 데몬 자동재개 액션 없음.
     [ "$state" = limit ] || continue

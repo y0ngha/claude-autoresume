@@ -96,6 +96,20 @@ draw() {
                   case "$rep2" in ''|PASSED) : ;;
                     *) status="$status ${D}$(printf "$(t st_resets)" "$(date -r "$rep2" '+%H:%M')" "$(left $((rep2-now)))")${R}" ;;
                   esac ;;
+      orglimit)   status="${YEL}$(t st_orglimit)${R}"; limited=$((limited+1))
+                  local orf3 off3 of3 eta3
+                  orf3="$STATE/${TMUX_SESSION}-${idx}.orgretried"
+                  off3="$STATE/${TMUX_SESSION}-${idx}.orgfirst"
+                  if [ -f "$orf3" ]; then
+                    status="$status ${D}$(t st_org_blocked)${R}"     # 재시도 후에도 지속
+                  elif [ -f "$off3" ]; then
+                    of3="$(cat "$off3" 2>/dev/null)"; eta3=$(( of3 + ORG_RETRY_DELAY ))
+                    if [ "$eta3" -gt "$now" ]; then
+                      status="$status ${D}$(printf "$(t st_org_retry)" "$(date -r "$eta3" '+%H:%M')" "$(left $((eta3-now)))")${R}"
+                    else
+                      status="$status ${D}$(t st_org_due)${R}"       # 예정시각 지남, 곧 재시도
+                    fi
+                  fi ;;
       background) status="${BLU}$(t st_bg)${R}"; bg=$((bg+1)) ;;
       *)          status="${GRY}$(t st_idle)${R}"; idle=$((idle+1)) ;;
     esac

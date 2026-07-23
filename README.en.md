@@ -104,15 +104,17 @@ Press `l` to switch to Korean.
 
 Each row is one window and shows, in order, the window name, the profile, the state, the usage left, the last activity time, the last auto-resume time, and whether the window is excluded from auto-resume.
 
-There are five states.
+There are six states.
 
 - working — the agent is actually generating a response.
   This state only shows when `esc to interrupt` is on screen.
   Simple changes like typing or the clock ticking don't count as working.
 - background — the main view is idle, but a background shell, agent, or workflow is running.
-- limit-wait — the session hit the 5-hour limit.
+- limit-wait — a personal account hit the 5-hour session limit.
   The daemon continues it once the reset time passes.
-- blocked — an org or weekly limit where auto-resume makes no sense.
+- org-limit — an enterprise (org) account is showing its spend-limit message.
+  Rather than blocking right away it retries once after 5 hours, and shows the scheduled retry time.
+- blocked — a weekly limit where auto-resume makes no sense.
   It only notifies, and you handle it yourself.
 - idle — genuinely stopped and waiting for your input, either finished or asking a question.
 
@@ -145,9 +147,10 @@ The daemon reads only the bottom part of the screen and sorts limit messages int
 | On-screen text | Kind | Daemon action |
 |---|---|---|
 | `You've used 97% of your session limit` | early warning | ignore |
-| `You've hit your session limit · resets 1:40pm` | session limit, text | send "continue" once the reset time passes |
-| `Stop and wait for limit to reset` + `Enter to confirm` | session limit, choice menu | pick option 1, then send "continue" after the reset |
-| `You've hit your org's monthly spend limit ...` | billing or weekly limit | notify only, don't send anything |
+| `You've hit your session limit · resets 1:40pm` | personal, session limit (text) | send "continue" once the reset time passes |
+| `Stop and wait for limit to reset` + `Enter to confirm` | session limit (choice menu) | pick option 1, then send "continue" after the reset |
+| `You've hit your weekly limit · resets ...` | personal, weekly limit | notify only (blocked) |
+| `You've hit your org's monthly spend limit ...` | enterprise, spend limit | retry once after 5h, block if it persists |
 
 It separates warnings from real limit messages, and because it reads only the bottom of the screen, it won't misread old text that scrolled up after a resume.
 It reads the reset time and waits until then, then sends right away.
@@ -157,6 +160,17 @@ Sometimes hitting the limit brings up a choice menu.
 Typed text doesn't work on a menu, so it uses the arrow keys and Enter to pick "Stop and wait for limit to reset".
 The text can linger on screen even after you pick, so it only acts on an open menu where the confirm prompt is also present.
 Once the selection is done and the reset passes, it falls through to the normal text-limit path and sends "continue".
+
+### Personal accounts and enterprise accounts
+
+The limit message tells the two account types apart, so they are handled differently.
+A personal account that hits the 5-hour limit shows a session-limit message with a reset time, and the daemon continues it as soon as that time passes.
+An enterprise (org) account shows a spend-limit message with no reset time even for the 5-hour limit, and the wording alone doesn't say whether it's the temporary 5-hour limit or the real monthly cap.
+So instead of blocking right away, the daemon waits until 5 hours after it first saw the message and injects "continue" once to retry.
+If the retry frees the session it carries on; if the same message remains after the retry, it treats it as a real block and only notifies.
+csm shows this as the org-limit state along with the scheduled retry time.
+The wait before retrying is set by `ORG_RETRY_DELAY` in `config.sh`.
+A personal account never shows this message, so this handling doesn't apply to it.
 
 ---
 
@@ -197,6 +211,7 @@ An alert only fires when the state holds steady for two checks in a row, which a
 | `INTERVAL` | 60 | check interval, seconds |
 | `MIN_RESEND_GAP` | 540 | minimum gap before sending or alerting the same window again, seconds |
 | `RESET_BUFFER` | 30 | send this many seconds after the reset time |
+| `ORG_RETRY_DELAY` | 18000 | wait before retrying an enterprise spend limit, seconds (default 5h) |
 | `CAPTURE_LINES` | 20 | how many bottom lines to judge from |
 
 After changing a value, apply it with `launchctl kickstart -k gui/$(id -u)/com.claude-autoresume`.

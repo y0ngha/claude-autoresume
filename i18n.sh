@@ -26,6 +26,10 @@ _msg_en() { case "$1" in
   st_limit)       printf '🟡 limit-wait ' ;;
   st_bg)          printf '🔵 background ' ;;
   st_idle)        printf '⚪ idle       ' ;;
+  st_orglimit)    printf '🟠 org-limit  ' ;;
+  st_org_retry)   printf '· retry %%s (%%s)' ;;
+  st_org_blocked) printf '· persists after retry' ;;
+  st_org_due)     printf '· retry due' ;;
   st_resets)      printf '· resets %%s (%%s)' ;;
   # relative time
   ago_sec)        printf '%%ss ago' ;;
@@ -78,6 +82,10 @@ _msg_en() { case "$1" in
   ntf_limit_body)       printf "Window '%%s' hit the session limit (waiting for reset)" ;;
   ntf_blocked_title)    printf 'Claude: blocked' ;;
   ntf_blocked_body)     printf "Window '%%s' blocked (billing/weekly) — manual check needed" ;;
+  ntf_orglimit_title)   printf 'Claude: org spend limit' ;;
+  ntf_orglimit_body)    printf "Window '%%s' hit the org spend limit — will retry once after 5h" ;;
+  ntf_orgblocked_title) printf 'Claude: blocked (org)' ;;
+  ntf_orgblocked_body)  printf "Window '%%s' still limited after retry — treating as blocked" ;;
   # ── daemon log ──
   lg_state)       printf "%%s [%%s] %%s (window='%%s')" ;;
   lg_menu)        printf "🟡 limit menu → auto-selected 'Stop and wait': %%s (window='%%s')" ;;
@@ -89,6 +97,10 @@ _msg_en() { case "$1" in
   lg_waiting)     printf "⏳ %%s session limit — waiting for resets (eta %%s, window='%%s')" ;;
   lg_inject)      printf "▶ resume injected (%%s): %%s (window='%%s')" ;;
   lg_inject_fail) printf "inject failed, will retry: %%s (window='%%s')" ;;
+  lg_orgseen)     printf "🟠 org spend limit detected — will retry once after 5h: %%s (window='%%s')" ;;
+  lg_orgwait)     printf "⏳ %%s org spend limit — waiting to retry (eta %%s, window='%%s')" ;;
+  lg_orgretry)    printf "▶ org limit retry injected after 5h: %%s (window='%%s')" ;;
+  lg_orgblocked)  printf "⛔ org spend limit persists after retry — blocked: %%s (window='%%s')" ;;
   lg_gap)         printf '… %%s session limit detected but injected recently (gap wait)' ;;
   lbl_passed)     printf 'resets passed' ;;
   lbl_unknown)    printf 'time unknown' ;;
@@ -131,6 +143,10 @@ _msg_ko() { case "$1" in
   st_limit)       printf '🟡 한도대기  ' ;;
   st_bg)          printf '🔵 백그라운드' ;;
   st_idle)        printf '⚪ 유휴      ' ;;
+  st_orglimit)    printf '🟠 기업한도  ' ;;
+  st_org_retry)   printf '· 재시도 %%s (%%s)' ;;
+  st_org_blocked) printf '· 재시도 후 지속' ;;
+  st_org_due)     printf '· 곧 재시도' ;;
   st_resets)      printf '· resets %%s (%%s)' ;;
   ago_sec)        printf '%%ss 전' ;;
   ago_min)        printf '%%dm 전' ;;
@@ -178,6 +194,10 @@ _msg_ko() { case "$1" in
   ntf_limit_body)       printf "'%%s' 세션 한도 도달 (리셋 대기)" ;;
   ntf_blocked_title)    printf 'Claude: 차단' ;;
   ntf_blocked_body)     printf "'%%s' 차단(결제/주간) — 수동 확인 필요" ;;
+  ntf_orglimit_title)   printf 'Claude: 기업 결제 한도' ;;
+  ntf_orglimit_body)    printf "'%%s' 기업 결제 한도 — 5시간 뒤 1회 재시도" ;;
+  ntf_orgblocked_title) printf 'Claude: 차단(기업)' ;;
+  ntf_orgblocked_body)  printf "'%%s' 재시도 후에도 한도 지속 — 차단 처리" ;;
   lg_state)       printf "%%s [%%s] %%s (window='%%s')" ;;
   lg_menu)        printf "🟡 한도 메뉴 → 'Stop and wait' 자동선택: %%s (window='%%s')" ;;
   lg_start)       printf 'watcher 시작 (session=%%s, interval=%%ss, gap=%%ss)' ;;
@@ -188,6 +208,10 @@ _msg_ko() { case "$1" in
   lg_waiting)     printf "⏳ %%s 세션한도 — resets까지 대기 (예정 %%s, window='%%s')" ;;
   lg_inject)      printf "▶ 이어가기 주입(%%s): %%s (window='%%s')" ;;
   lg_inject_fail) printf "주입 실패, 재시도 예정: %%s (window='%%s')" ;;
+  lg_orgseen)     printf "🟠 기업 결제 한도 감지 — 5시간 뒤 1회 재시도 예정: %%s (window='%%s')" ;;
+  lg_orgwait)     printf "⏳ %%s 기업 결제 한도 — 재시도까지 대기 (예정 %%s, window='%%s')" ;;
+  lg_orgretry)    printf "▶ 기업 한도 5시간 경과 → 1회 재시도 주입: %%s (window='%%s')" ;;
+  lg_orgblocked)  printf "⛔ 기업 결제 한도 재시도 후에도 지속 — 차단: %%s (window='%%s')" ;;
   lg_gap)         printf '… %%s 세션한도 감지됐지만 최근 주입함 (gap 대기 중)' ;;
   lbl_passed)     printf 'resets 경과' ;;
   lbl_unknown)    printf '시각 미상' ;;
