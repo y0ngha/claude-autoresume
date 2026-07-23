@@ -123,16 +123,23 @@ match_limit_menu() {
 }
 
 # 화면 내용(stdin)을 단일 상태로 분류(csm·데몬 공용). 우선순위 순서:
-#   working | blocked | background | limit | idle
-# background 를 limit 보다 먼저 보는 이유: 재개 후 계속 작업 중인데 옛 한도 배너가
-# 화면에 남아 있으면 limit 로 오판해 잘못 재주입할 수 있음. 백그라운드 작업이 돌고 있으면
-# 아직 '멈춘 한도'가 아니므로 background 로 본다. 진짜 멈춘 한도는 background 신호가 없다.
+#   working | limit(활성 메뉴) | blocked | background | limit(텍스트) | idle
+# · 활성 한도 메뉴(match_limit_menu: 'Enter to confirm · Esc to cancel' 가 함께 뜬 열린
+#   메뉴)는 지금 당장 처리해야 할 live 프롬프트라 blocked/background 보다 먼저 본다.
+#   서브에이전트 실패 메시지에 'monthly spend limit' 같은 문구가 남아 blocked 로 걸리거나
+#   'Waiting for N background agents' 로 background 로 걸려도, 실제 눌러야 할 메뉴가 떠
+#   있으면 그 메뉴 선택이 우선이어야 하기 때문.
+# · 반대로 텍스트형 한도(match_resume)는 background 보다 뒤에 본다: 재개 후 작업 중인데
+#   옛 한도 배너가 화면에 남아 있으면 limit 로 오판해 잘못 재주입할 수 있으므로, 백그라운드
+#   신호가 있으면 아직 '멈춘 한도'가 아니라 background 로 본다. 활성 메뉴는 잔여 배너와
+#   달리 확정 프롬프트가 함께 떠 있을 때만 참이라 이 오판 위험이 없다.
 classify() {
   local c; c="$(cat)"
-  if   printf '%s' "$c" | match_working;    then printf working
-  elif printf '%s' "$c" | match_blocked;    then printf blocked
-  elif printf '%s' "$c" | match_background; then printf background
-  elif printf '%s' "$c" | match_resume || printf '%s' "$c" | match_limit_menu; then printf limit
+  if   printf '%s' "$c" | match_working;     then printf working
+  elif printf '%s' "$c" | match_limit_menu;  then printf limit
+  elif printf '%s' "$c" | match_blocked;     then printf blocked
+  elif printf '%s' "$c" | match_background;  then printf background
+  elif printf '%s' "$c" | match_resume;      then printf limit
   else printf idle; fi
 }
 
