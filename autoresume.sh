@@ -101,6 +101,9 @@ scan_once() {
   while read -r idx; do
     case "$idx" in ''|*[!0-9]*) continue ;; esac
     name="$(_t 8 tmux display-message -p -t "$TMUX_SESSION:$idx" '#{window_name}' 2>/dev/null)"
+    # 이름 조회 실패(빈 문자열)면 is_disabled 안전확인이 불가능하므로 이 스캔은 스킵한다
+    # (비활성화(disabled.list)한 창에 실수로 주입/선택하는 것을 방지). 다음 스캔에서 재시도.
+    [ -z "$name" ] && continue
     target="$TMUX_SESSION:$idx"
     content="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
     # capture 실패/빈 화면이면 오판하지 않도록 스킵.

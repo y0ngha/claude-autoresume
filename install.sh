@@ -49,8 +49,6 @@ cat > "$PLIST" <<PLIST_EOF
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>TMUX_TMPDIR</key><string>/tmp</string>
-    <key>LANG</key><string>en_US.UTF-8</string>
-    <key>LC_ALL</key><string>en_US.UTF-8</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
