@@ -55,12 +55,15 @@ IGNORE_REGEX="used [0-9]{1,3}% of|approaching"
 LIMIT_MENU_OPT="stop and wait for limit to reset"
 LIMIT_MENU_ACTIVE="enter to confirm|esc to cancel|❯ *1\."
 
-# 백그라운드 작업(shell/agent/workflow/sub-agent) 진행 중 신호 → '유휴' 아닌 '🔵 백그라운드'
+# 백그라운드 작업 진행 중 신호 → '유휴' 아닌 '🔵 백그라운드'
 #   · "N shells still running" / "· N shell"        : 백그라운드 셸
-#   · "Waiting for N background agent(s)"            : 서브에이전트 대기
-#   · "N/M agents" / "← N agent"                     : 에이전트 진행
+#   · "Waiting for N background/dynamic agent(s)"    : 서브에이전트/워크플로 대기
+#   · "N/M agents" / "← N agents"                    : 에이전트 진행/정의 수(상태줄)
 #   · "↓ 104.0k tokens" / "45m 12s · ↓"             : 실행 중 서브에이전트의 토큰/시간 카운터
-BACKGROUND_REGEX="[0-9]+ shells? still running|· [0-9]+ shell|running in the background|waiting for [0-9]+ (background |dynamic )?(agent|workflow|shell)|[0-9]+/[0-9]+ agents|← [0-9]+ agent|↓ [0-9][0-9.,]*[km]? tokens|[0-9]+m [0-9]+s · ↓"
+# 주의: 이 신호 중 일부('← N agents' 상태줄, 스크롤백에 남은 '✻ Waiting…' 옛 로그)는
+# 한도로 멈춰도 화면에 남아 있을 수 있다. 그래서 classify 에서는 '텍스트 한도(match_resume)'
+# 를 background 보다 먼저 본다(아래 classify 주석 참고).
+BACKGROUND_REGEX="[0-9]+ shells? still running|· [0-9]+ shell|running in the background|waiting for [0-9]+ (background |dynamic )?(agent|workflow|shell)|[0-9]+/[0-9]+ agents|← [0-9]+ agents?|↓ [0-9][0-9.,]*[km]? tokens|[0-9]+m [0-9]+s · ↓"
 
 # 메인 에이전트가 '실제로 생성 중'일 때만 뜨는 문구 → '🟢 작업중' 판정.
 # (화면 해시 변화만으로 판정하면 프롬프트 타이핑·/status 등도 작업중으로 오판되므로,
@@ -134,25 +137,27 @@ match_limit_menu() {
 }
 
 # 화면 내용(stdin)을 단일 상태로 분류(csm·데몬 공용). 우선순위 순서:
-#   working | limit(활성 메뉴) | blocked | orglimit | background | limit(텍스트) | idle
+#   working | limit(활성 메뉴) | blocked | orglimit | limit(텍스트) | background | idle
+# · working(esc to interrupt)이 최우선: 메인 에이전트가 지금 생성 중이면 무조건 작업중.
+#   재개 후 다시 돌기 시작하면 이 신호가 떠서, 옛 한도 배너가 화면에 남아 있어도 limit 로
+#   오판하지 않는다(재주입 방지의 1차 방어선).
 # · 활성 한도 메뉴(match_limit_menu: 'Enter to confirm · Esc to cancel' 가 함께 뜬 열린
-#   메뉴)는 지금 당장 처리해야 할 live 프롬프트라 blocked/orglimit/background 보다 먼저 본다.
-#   서브에이전트 실패 메시지에 'monthly spend limit' 같은 문구가 남아 있어도, 실제 눌러야
-#   할 메뉴가 떠 있으면 그 메뉴 선택이 우선이어야 하기 때문.
-# · orglimit(기업 월 결제 한도 문구)은 background 보다 먼저 본다: 재시도가 5시간 뒤에야
-#   일어나므로(느린 동작), 잔여 문구가 잠깐 보였다 사라지면 그 전에 상태가 바뀌어 재시도
-#   타이머가 리셋된다. 즉 5시간 타이머 자체가 옛 문구 오판을 막아준다.
-# · 반대로 텍스트형 한도(match_resume)는 즉시 주입하는 빠른 동작이라 background 보다 뒤에
-#   본다: 재개 후 작업 중인데 옛 한도 배너가 남아 있으면 잘못 재주입할 수 있으므로, 백그라운드
-#   신호가 있으면 아직 '멈춘 한도'가 아니라 background 로 본다.
+#   메뉴)는 지금 당장 처리해야 할 live 프롬프트라 그다음으로 본다.
+# · orglimit(기업 월 결제 한도)은 background 보다 먼저 본다(자세한 이유는 위 정의 참고).
+# · 텍스트 한도(match_resume)를 background 보다 '먼저' 본다: background 신호 중 일부는
+#   한도로 멈춰도 화면에 남는다 — claude 하단 상태줄의 '← N agents'(세션에 정의된 서브
+#   에이전트 수, 상시 표시)나, 스크롤백에 굳은 '✻ Waiting…' 옛 로그 등. 그래서 background
+#   가 한도보다 먼저면 진짜 멈춘 한도가 background 로 가려져 재개가 안 된다. 실제로 작업이
+#   도는 중이면 위의 working(esc to interrupt)이 먼저 잡으므로, 여기서 한도를 먼저 봐도
+#   '재개 후 아직 도는 세션'을 한도로 오판하지 않는다.
 classify() {
   local c; c="$(cat)"
   if   printf '%s' "$c" | match_working;     then printf working
   elif printf '%s' "$c" | match_limit_menu;  then printf limit
   elif printf '%s' "$c" | match_blocked;     then printf blocked
   elif printf '%s' "$c" | match_orglimit;    then printf orglimit
-  elif printf '%s' "$c" | match_background;  then printf background
   elif printf '%s' "$c" | match_resume;      then printf limit
+  elif printf '%s' "$c" | match_background;  then printf background
   else printf idle; fi
 }
 
