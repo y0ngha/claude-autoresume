@@ -86,6 +86,19 @@ CAPTURE_LINES=20      # 화면 하단 몇 줄 보고 판단할지. 진짜 멈춘
 
 export TMUX_TMPDIR="${TMUX_TMPDIR:-/tmp}"   # launchd 데몬과 tmux 소켓 공유
 
+# ── 로케일 보장 (매우 중요) ──────────────────────────────────────────────────
+# tmux 는 C/POSIX(로케일 미설정) 환경에서 capture-pane/포맷 출력의 '비인쇄' 바이트를
+# 치환한다. 대표적으로 탭(0x09)→'_'(0x5f), UTF-8 박스문자/❯·↓← 등이 깨진다.
+# launchd 로 뜬 데몬은 로케일이 비어 있어(C) 이 때문에:
+#   · window 목록의 탭 구분자가 '_' 로 바뀌어 파싱이 전부 실패 → 어떤 창도 처리 못 함
+#   · 화면 캡처의 UTF-8 문자가 깨져 BACKGROUND/LIMIT_MENU 등 정규식이 빗나갈 수 있음
+# 따라서 UTF-8 로케일을 보장한다(이미 UTF-8 이면 사용자 설정을 유지).
+# 다른 로케일을 쓰려면 CAR_LOCALE 로 지정(예: ko_KR.UTF-8).
+case "${LC_ALL:-${LANG:-}}" in
+  *UTF-8*|*utf-8*|*UTF8*|*utf8*) ;;                      # 이미 UTF-8 → 유지
+  *) export LANG="${CAR_LOCALE:-en_US.UTF-8}" LC_ALL="${CAR_LOCALE:-en_US.UTF-8}" ;;
+esac
+
 # ── csm [n] 새 세션 메뉴 후보 (배포 기본은 'claude' 하나) ────────────────────
 #   프로필 런처(셸 함수/alias)를 쓰면 여기에 추가하세요. 각 항목은 대상 창의
 #   대화형 셸에서 그대로 실행되므로, 그 셸이 아는 명령이면 무엇이든 됩니다.

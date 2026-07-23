@@ -93,9 +93,14 @@ scan_once() {
   fi
   prune_orphans
 
-  while IFS=$'\t' read -r idx name; do
-    # window_index 는 항상 숫자. 아니면(탭 파싱 깨짐 등) 잘못된 행 → 스킵.
+  # window 열거는 '인덱스만'(숫자) 받아 반복하고, 이름은 창별로 따로 조회한다.
+  #   예전엔 '#{window_index}\t#{window_name}' 한 줄을 IFS=탭으로 쪼갰는데,
+  #   tmux 는 C/POSIX(빈) 로케일에서 포맷 출력의 탭(0x09)을 '_'(0x5f)로 치환한다.
+  #   launchd 데몬은 로케일이 비어 있어(config.sh 에서 UTF-8 강제) 이 치환으로 탭 분리가
+  #   깨져 모든 창이 스킵됐다. 구분자 없는 인덱스-only 열거는 로케일과 무관하게 안전하다.
+  while read -r idx; do
     case "$idx" in ''|*[!0-9]*) continue ;; esac
+    name="$(_t 8 tmux display-message -p -t "$TMUX_SESSION:$idx" '#{window_name}' 2>/dev/null)"
     target="$TMUX_SESSION:$idx"
     content="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
     # capture 실패/빈 화면이면 오판하지 않도록 스킵.
@@ -162,7 +167,7 @@ scan_once() {
     else
       log "$(tf lg_gap "$target")"
     fi
-  done < <(_t 8 tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}	#{window_name}' 2>/dev/null)
+  done < <(_t 8 tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}' 2>/dev/null)
 }
 
 # 상시 감시 루프를 함수로 감싸 '한 번에 파싱'되게 함. 이렇게 하면 실행 중에 이 파일이
