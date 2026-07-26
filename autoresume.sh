@@ -152,9 +152,9 @@ approve_window() {
   # 누른 게 실제로 먹혔는지 바로 확인한다. 선택지 목록이 그대로면 그 키는 아무 일도 하지
   # 않은 것 → 실패로 세고, APPROVE_MAX_TRIES 를 넘기면 그 화면은 사람에게 넘긴다.
   sleep 1.5
-  after="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
+  after="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$APPROVE_CAPTURE_LINES")"
   ah="$(printf '%s' "$after" | approve_options | cksum | awk '{print $1}')"
-  if [ "$ah" = "$h" ] && [ "$(printf '%s' "$after" | classify)" = permission ]; then
+  if [ "$ah" = "$h" ] && [ "$(classify_deep "$(printf '%s\n' "$after" | tail -n "$CAPTURE_LINES")" "$after")" = permission ]; then
     pc=$((pc+1))
   else
     pc=0
@@ -173,15 +173,18 @@ approve_window() {
 approve_scan() {
   [ "${AUTO_APPROVE:-0}" = 1 ] || return 0
   _t 8 tmux has-session -t "$TMUX_SESSION" 2>/dev/null || return 0
-  local idx name content
+  local idx name content shallow
   while read -r idx; do
     case "$idx" in ''|*[!0-9]*) continue ;; esac
     name="$(_t 8 tmux display-message -p -t "$TMUX_SESSION:$idx" '#{window_name}' 2>/dev/null)"
     [ -z "$name" ] && continue
-    content="$(_t 8 tmux capture-pane -p -t "$TMUX_SESSION:$idx" 2>/dev/null | tail -n "$CAPTURE_LINES")"
+    # 승인 판정은 깊은 창으로 뜬다(미리보기 패널이 붙은 대화상자는 20줄을 넘김). 한 번만
+    # 캡처하고 얕은 창은 거기서 잘라 써서 tmux 왕복을 늘리지 않는다.
+    content="$(_t 8 tmux capture-pane -p -t "$TMUX_SESSION:$idx" 2>/dev/null | tail -n "$APPROVE_CAPTURE_LINES")"
     [ -z "$content" ] && continue
+    shallow="$(printf '%s\n' "$content" | tail -n "$CAPTURE_LINES")"
     # classify 로 최종 확인 — 한도/작업중이 먼저 잡히면 그쪽이 우선이므로 손대지 않는다.
-    [ "$(printf '%s' "$content" | classify)" = permission ] || continue
+    [ "$(classify_deep "$shallow" "$content")" = permission ] || continue
     approve_window "$idx" "$name" "$content" "$(date +%s)"
   done < <(_t 8 tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}' 2>/dev/null)
 }
@@ -210,7 +213,11 @@ scan_once() {
     # (비활성화(disabled.list)한 창에 실수로 주입/선택하는 것을 방지). 다음 스캔에서 재시도.
     [ -z "$name" ] && continue
     target="$TMUX_SESSION:$idx"
-    content="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
+    # 한 번 캡처해서 두 창으로 쓴다. content(얕은 창)는 한도 판정 전용이라 깊이를 그대로
+    # 두고(재개 후 위로 밀려난 옛 배너 오독 방지), apcontent(깊은 창)는 승인 대화상자
+    # 판정에만 쓴다. 미리보기 패널이 붙은 질문은 대화상자가 20줄보다 커서 얕은 창에 안 잡힌다.
+    apcontent="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$APPROVE_CAPTURE_LINES")"
+    content="$(printf '%s\n' "$apcontent" | tail -n "$CAPTURE_LINES")"
     now="$(date +%s)"
     # capture 실패/빈 화면(프롬프트가 위에 있고 하단이 비었을 때 포함)이면 상태 판정을 건너뛴다.
     # 단, 빈 화면은 'org 한도 아님'이 확실하므로 org 재시도 상태는 정리한다. 그래야 예전
@@ -218,7 +225,7 @@ scan_once() {
     # 차단되는 일이 없다.
     if [ -z "$content" ]; then clear_org_state "$idx"; continue; fi
 
-    state="$(printf '%s' "$content" | classify)"
+    state="$(classify_deep "$content" "$apcontent")"
     notify_transition "$idx" "$name" "$state"     # 상태 전이 알림(플래그별)
 
     # 기업 한도(orglimit) 가 아닌 상태로 바뀌면 org 재시도 상태를 리셋한다(재개/전이 시).
@@ -270,7 +277,7 @@ scan_once() {
     # 승인 대기(권한 요청·질문 대화상자) → AUTO_APPROVE=1 이면 긍정 선택지를 눌러 진행.
     # 꺼져 있으면 아무것도 하지 않는다(위 상태 전이 알림만 나감).
     if [ "$state" = permission ]; then
-      approve_window "$idx" "$name" "$content" "$now"
+      approve_window "$idx" "$name" "$apcontent" "$now"
       continue
     fi
 

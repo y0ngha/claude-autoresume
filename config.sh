@@ -90,7 +90,8 @@ APPROVE_CURSOR="^[[:space:]]*❯[[:space:]]*[0-9]{1,2}\."
 APPROVE_ASK="do you want to (proceed|create|make this edit|allow|use this api key|continue)|would you like to proceed|ready to submit your answers"
 # APPROVE_FOOTER : 선택 대화상자 공통 하단 안내. mode=all 일 때 AskUserQuestion·폴더신뢰
 #                  같이 질문 문구가 자유로운 대화상자까지 잡기 위한 보조 증거.
-APPROVE_FOOTER="esc to cancel|enter to confirm|enter to select|tab to amend|shift\+tab to approve"
+#                  'press n to add notes'는 선택지에 미리보기 패널이 붙는 질문의 하단 안내다.
+APPROVE_FOOTER="esc to cancel|enter to confirm|enter to select|tab to amend|shift\+tab to approve|press n to add notes"
 # APPROVE_YES    : '그대로 진행' 선택지. 여기 맞는 선택지가 있으면 항상 이걸 우선한다.
 APPROVE_YES="^yes([,. ]|$)|^submit answers|^continue([,. ]|$)"
 # APPROVE_ALWAYS : '앞으로 묻지 않기' 선택지. AUTO_APPROVE_PREFER=always 일 때만 우선.
@@ -101,6 +102,10 @@ APPROVE_NEVER="^no([,. ]|$)|^cancel|^type something|^chat about this|^tell claud
 # APPROVE_CHECKBOX : multiSelect 질문의 체크박스. 이게 보이면 번호키는 '토글'이라
 #                  번호키 → Right(제출 화면으로) 2단계로 처리한다.
 APPROVE_CHECKBOX="^[[:space:]]*(❯[[:space:]]*)?[0-9]{1,2}\.[[:space:]]*\[[[:space:]✔x]\]"
+# APPROVE_STALE  : 응답이 시작됐다는 표시(⏺ 응답 머리, ✻ 진행 표시). 대화상자 하단 안내
+#                  '아래'에 이게 보이면 그 대화상자는 이미 답이 끝나 기록으로 남은 것이다.
+#                  깊은 창(APPROVE_CAPTURE_LINES)에서만 쓰는 오탐 방지 장치.
+APPROVE_STALE="^[[:space:]]*(⏺|✻)"
 
 # 메인 에이전트가 '실제로 생성 중'일 때만 뜨는 문구 → '🟢 작업중' 판정.
 # (화면 해시 변화만으로 판정하면 프롬프트 타이핑·/status 등도 작업중으로 오판되므로,
@@ -170,6 +175,17 @@ ORG_RETRY_DELAY=18000 # 기업 한도(orglimit): 처음 감지 후 이 시간(�
 CAPTURE_LINES=20      # 화면 하단 몇 줄 보고 판단할지. 진짜 멈춘 한도배너는 하단 ~17줄
                       # 이내에 있음. 너무 크게 잡으면 재개 후 위로 밀려난 옛 배너를 다시 잡아
                       # limit 로 오판(잘못된 재주입). background-먼저 순서와 함께 오판을 막음.
+APPROVE_CAPTURE_LINES=60  # 승인 대화상자 판정에만 쓰는 더 깊은 창.
+                      # 선택지에 미리보기 패널이 붙는 질문(AskUserQuestion 등)은 대화상자
+                      # 높이가 40줄을 넘어서, 번호 선택지가 화면 위쪽으로 밀려난다. 20줄만
+                      # 보면 미리보기 박스 중간만 읽혀 '❯ 1.' 커서를 못 찾고 idle 로 새 버린다.
+                      # 한도 판정은 위 CAPTURE_LINES(얕은 창) 그대로 두고(옛 배너 오독 방지)
+                      # 승인 판정만 이 깊이로 한 번 더 본다. 너무 키우면 대화상자 위쪽 본문의
+                      # 번호 목록('1. …')이 선택지로 잡힐 위험이 커지므로 한 화면 정도로 둔다.
+                      # 얕은 창보다 작게 잡으면 승격 자체가 의미를 잃으므로 최소값을 맞춘다.
+if [ "$APPROVE_CAPTURE_LINES" -lt "$CAPTURE_LINES" ] 2>/dev/null; then
+  APPROVE_CAPTURE_LINES="$CAPTURE_LINES"
+fi
 
 export TMUX_TMPDIR="${TMUX_TMPDIR:-/tmp}"   # launchd 데몬과 tmux 소켓 공유
 
@@ -216,12 +232,16 @@ match_limit_menu() {
 #   · 같은 번호가 여러 번 나오면 '화면 아래쪽 것'만 남긴다(스크롤백의 옛 목록 무시).
 #   · 1번부터 끊기지 않고 이어지는 번호까지만 인정한다. 파일 diff 안의 '12. 항목' 같은
 #     본문 텍스트가 우연히 선택지로 잡히는 것을 막는 장치(대화상자는 항상 1번부터다).
+#   · 선택지 오른쪽에 미리보기 패널이 붙는 질문은 같은 줄에 박스 테두리('│','┌'…)와 패널
+#     본문이 딸려 온다. 그 지점부터 잘라 라벨만 남긴다. 커서를 옮기면 패널 내용이 바뀌는데,
+#     안 자르면 라벨이 매번 달라져 폭주 방지 해시(선택지 목록 기준)가 계속 리셋된다.
 approve_options() {
   local c line num label prev
   c="$(cat)"
   printf '%s\n' "$c" \
     | sed -e 's/❯/ /g' \
     | grep -E '^[[:space:]]*[0-9]{1,2}\.[[:space:]]' \
+    | sed -E 's/[[:space:]]{2,}[│┃┆┇╎╏┌└├┬┴┼─].*$//' \
     | sed -E 's/^[[:space:]]*([0-9]{1,2})\.[[:space:]]+/\1|/' \
     | awk -F'|' '{ last[$1]=$0; if (!($1 in seen)) { seen[$1]=1; order[++n]=$1 } }
                  END { for (i=1;i<=n;i++) print last[order[i]] }' \
@@ -305,6 +325,44 @@ classify() {
   elif printf '%s' "$c" | match_permission;  then printf permission
   elif printf '%s' "$c" | match_background;  then printf background
   else printf idle; fi
+}
+
+# 깊은 창에 보이는 대화상자가 '지금 살아 있는' 것인가.
+#   마지막 하단 안내(FOOTER/ASK) 줄 아래로 응답 시작 표시(APPROVE_STALE)가 있으면, 그
+#   대화상자는 이미 답이 끝나고 대화 기록으로 남은 것이다 → 건드리면 안 된다.
+#   판정은 grep -E 로 한다. awk 의 -v 로 패턴을 넘기면 'shift\+tab' 같은 이스케이프가
+#   할당 단계에서 깨져('+'가 수량자가 됨) 그 문구만 조용히 안 잡힌다.
+approve_is_live() {
+  local c last stale
+  c="$(cat)"
+  last="$(printf '%s\n' "$c" | grep -niE "$APPROVE_FOOTER|$APPROVE_ASK" | tail -1 | cut -d: -f1)"
+  [ -n "$last" ] || return 1                      # 하단 안내가 아예 없음 → 대화상자 아님
+  stale="$(printf '%s\n' "$c" | grep -nE "$APPROVE_STALE" | tail -1 | cut -d: -f1)"
+  [ -n "$stale" ] || return 0                     # 안내 아래로 응답 없음 → 살아 있음
+  [ "$stale" -le "$last" ]                        # 응답이 안내보다 위면 살아 있음
+}
+
+# classify 를 두 창으로 돌린다: 한도 판정은 얕은 창(CAPTURE_LINES) 그대로, 승인 대화상자만
+# 깊은 창(APPROVE_CAPTURE_LINES)에서 한 번 더 찾는다.
+#   미리보기 패널이 붙는 질문은 대화상자 높이가 40줄을 넘어 번호 선택지가 얕은 창 위로
+#   밀려난다. 그러면 커서 줄이 안 보여 idle 로 새고, 아무도 눌러주지 않는다.
+#   깊은 창을 쓰는 곳을 승인으로만 한정하는 이유: 한도 판정에서 창을 키우면 재개 후 위로
+#   밀려난 옛 한도 배너를 다시 잡아 잘못 재주입할 수 있다(CAPTURE_LINES 주석 참고).
+#   그래서 얕은 판정이 idle/background 로 끝났을 때만 승격을 시도한다. working/limit/
+#   blocked/orglimit 이 먼저 잡혔으면 그쪽 우선순위를 그대로 존중한다.
+#   승격에는 조건이 둘 더 붙는다. (1) 하단 안내가 '얕은 창 안에' 있어야 한다 — 살아 있는
+#   대화상자는 화면 맨 아래에서 끝나기 때문이다. (2) approve_is_live 로 그 안내 아래에
+#   응답이 시작되지 않았는지 본다. 창을 깊게 파면 이미 답이 끝난 옛 대화상자가 스크롤백에
+#   그대로 남아 걸리는데(Claude 는 답한 질문도 기록에 그려 둔다), 이 둘로 가른다.
+classify_deep() {  # $1=얕은 화면, $2=깊은 화면
+  local s; s="$(printf '%s' "$1" | classify)"
+  case "$s" in
+    idle|background)
+      if printf '%s' "$1" | grep -qiE "$APPROVE_FOOTER|$APPROVE_ASK" \
+         && printf '%s' "$2" | approve_is_live \
+         && printf '%s' "$2" | match_permission; then printf permission; return 0; fi ;;
+  esac
+  printf '%s' "$s"
 }
 
 # 창 이름이 자동재개 제외 목록에 있나

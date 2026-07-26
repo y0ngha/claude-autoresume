@@ -80,8 +80,11 @@ draw() {
   while IFS=$'\t' read -r idx name; do
     [ -z "$idx" ] && continue
     n=$((n+1))
-    local cur curhash hashf chgf prevhash lastchg status inj sf prof pbadge usage ustr dis
-    cur="$($T capture-pane -p -t "$TMUX_SESSION:$idx" 2>/dev/null | tail -n "$CAPTURE_LINES")"
+    local cur curdeep curhash hashf chgf prevhash lastchg status inj sf prof pbadge usage ustr dis
+    # 데몬과 같은 두 창 구성: cur(얕은 창)는 한도·사용량 판정용, curdeep(깊은 창)은 승인
+    # 대화상자 판정용. 미리보기 패널이 붙은 질문은 대화상자가 얕은 창보다 커서 안 잡힌다.
+    curdeep="$($T capture-pane -p -t "$TMUX_SESSION:$idx" 2>/dev/null | tail -n "$APPROVE_CAPTURE_LINES")"
+    cur="$(printf '%s\n' "$curdeep" | tail -n "$CAPTURE_LINES")"
     curhash="$(printf '%s' "$cur" | cksum | awk '{print $1}')"
     hashf="$RT/${idx}.hash"; chgf="$RT/${idx}.chg"
     prevhash=""; [ -f "$hashf" ] && prevhash="$(cat "$hashf" 2>/dev/null)"
@@ -90,7 +93,7 @@ draw() {
     lastchg="$now"; [ -f "$chgf" ] && lastchg="$(cat "$chgf" 2>/dev/null)"
 
     # 상태 판정은 데몬과 동일한 classify() 사용(작업중=esc to interrupt, 한도=텍스트/활성메뉴 등).
-    local st2; st2="$(printf '%s' "$cur" | classify)"
+    local st2; st2="$(classify_deep "$cur" "$curdeep")"
     case "$st2" in
       working)    status="${GRN}$(t st_working)${R}"; working=$((working+1)) ;;
       blocked)    status="${RED}$(t st_blocked)${R}"; blocked=$((blocked+1)) ;;
@@ -115,7 +118,7 @@ draw() {
                   fi ;;
       permission) status="${MAG}$(t st_permission)${R}"; perm=$((perm+1))
                   # 무엇을 물어보는지 한 줄 요약(첫 번째 선택지)까지 붙여 준다.
-                  local po; po="$(printf '%s' "$cur" | approve_options | head -1 | cut -d'|' -f2 | cut -c1-34)"
+                  local po; po="$(printf '%s' "$curdeep" | approve_options | head -1 | cut -d'|' -f2 | cut -c1-34)"
                   [ -n "$po" ] && status="$status ${D}· 1. ${po}${R}" ;;
       background) status="${BLU}$(t st_bg)${R}"; bg=$((bg+1)) ;;
       *)          status="${GRY}$(t st_idle)${R}"; idle=$((idle+1)) ;;
