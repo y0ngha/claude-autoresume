@@ -18,7 +18,7 @@ _msg_en() { case "$1" in
   title)          printf ' ⌘ Claude Session Manager ' ;;
   daemon_on)      printf '● auto-resume ON' ;;
   daemon_off)     printf '○ auto-resume OFF' ;;
-  keys)           printf '  [a]attach [n]new [k]kill [p]auto-toggle [t]alerts [l]lang [r]refresh [q]quit · refresh %%ss' ;;
+  keys)           printf '  [a]attach [n]new [k]kill [p]auto-toggle [y]auto-approve [t]alerts [l]lang [r]refresh [q]quit · refresh %%ss' ;;
   no_session)     printf "No session '%%s'. Press [n] to start one." ;;
   # state labels (label part padded to 11 cols so columns align)
   st_working)     printf '🟢 working    ' ;;
@@ -26,6 +26,7 @@ _msg_en() { case "$1" in
   st_limit)       printf '🟡 limit-wait ' ;;
   st_bg)          printf '🔵 background ' ;;
   st_idle)        printf '⚪ idle       ' ;;
+  st_permission)  printf '🟣 needs-ok   ' ;;
   st_orglimit)    printf '🟠 org-limit  ' ;;
   st_org_retry)   printf '· retry %%s (%%s)' ;;
   st_org_blocked) printf '· persists after retry' ;;
@@ -42,7 +43,8 @@ _msg_en() { case "$1" in
   row_active)     printf '· active %%s' ;;
   row_inject)     printf '· auto-inject %%s' ;;
   excluded)       printf '⏸excluded' ;;
-  summary)        printf '%%d sessions  ·  🟢 working %%d  🔵 background %%d  🟡 limit-wait %%d  ⛔ blocked %%d  ⚪ idle %%d' ;;
+  no_approve)     printf '⏸no-approve' ;;
+  summary)        printf '%%d sessions  ·  🟢 working %%d  🔵 background %%d  🟡 limit-wait %%d  ⛔ blocked %%d  🟣 needs-ok %%d  ⚪ idle %%d' ;;
   recent_title)   printf 'Recent auto-resume activity' ;;
   # ── actions ──
   cancel)         printf 'cancel' ;;
@@ -64,7 +66,24 @@ _msg_en() { case "$1" in
   toggle_on)      printf "'%%s' auto-resume ON" ;;
   toggle_off)     printf "'%%s' auto-resume OFF (excluded)" ;;
   notify_title)   printf 'Notify on state change (toggle):' ;;
-  notify_prompt)  printf 'number 1-5 (esc=cancel): ' ;;
+  notify_prompt)  printf 'number 1-6 (esc=cancel): ' ;;
+  # ── auto-approve settings ──
+  ap_title)       printf 'Auto-approve permission prompts:' ;;
+  ap_warn)        printf 'While ON, nobody reviews before rm / overwrites / network calls run.' ;;
+  ap_master)      printf 'auto-approve' ;;
+  ap_mode)        printf 'scope' ;;
+  ap_mode_perm)   printf 'permission prompts only' ;;
+  ap_mode_all)    printf 'every prompt (questions, plans, folder trust)' ;;
+  ap_prefer)      printf 'answer' ;;
+  ap_prefer_once) printf "Yes (this time only)" ;;
+  ap_prefer_alw)  printf "Yes, and don't ask again (when offered)" ;;
+  ap_perwin)      printf 'exclude a window from auto-approve...' ;;
+  ap_prompt)      printf 'number 1-4 (esc=cancel): ' ;;
+  ap_win_prompt)  printf 'window name (esc=cancel): ' ;;
+  ap_win_on)      printf "'%%s' auto-approve ON" ;;
+  ap_win_off)     printf "'%%s' auto-approve OFF (excluded)" ;;
+  ap_filter)      printf 'only when screen matches: %%s' ;;
+  ap_deny)        printf 'never when screen matches: %%s' ;;
   # ── shell functions (cbg/cba/...) ──
   sh_no_session)  printf 'no claude session' ;;
   sh_attach_prompt) printf 'number/name (empty=whole session): ' ;;
@@ -86,6 +105,8 @@ _msg_en() { case "$1" in
   ntf_orglimit_body)    printf "Window '%%s' hit the org spend limit — will retry once after 5h" ;;
   ntf_orgblocked_title) printf 'Claude: blocked (org)' ;;
   ntf_orgblocked_body)  printf "Window '%%s' still limited after retry — treating as blocked" ;;
+  ntf_permission_title) printf 'Claude: waiting for approval' ;;
+  ntf_permission_body)  printf "Window '%%s' is asking permission and cannot continue on its own" ;;
   # ── daemon log ──
   lg_state)       printf "%%s [%%s] %%s (window='%%s')" ;;
   lg_menu)        printf "🟡 limit menu → auto-selected 'Stop and wait': %%s (window='%%s')" ;;
@@ -102,6 +123,12 @@ _msg_en() { case "$1" in
   lg_orgretry)    printf "▶ org limit retry injected after 5h: %%s (window='%%s')" ;;
   lg_orgblocked)  printf "⛔ org spend limit persists after retry — blocked: %%s (window='%%s')" ;;
   lg_gap)         printf '… %%s session limit detected but injected recently (gap wait)' ;;
+  lg_ap_start)    printf 'auto-approve ON (scope=%%s, answer=%%s, scan=%%ss)' ;;
+  lg_approve)     printf "✔ auto-approved [%%s] '%%s': %%s (window='%%s')" ;;
+  lg_ap_fail)     printf "auto-approve keypress failed, will retry: %%s (window='%%s')" ;;
+  lg_ap_excluded) printf "⏸ %%s auto-approve excluded: window='%%s'" ;;
+  lg_ap_deny)     printf "🛑 auto-approve blocked by deny pattern: %%s (window='%%s') — manual check needed" ;;
+  lg_ap_giveup)   printf "🟣 prompt did not close after retries — leaving it for you: %%s (window='%%s')" ;;
   lbl_passed)     printf 'resets passed' ;;
   lbl_unknown)    printf 'time unknown' ;;
   # ── injected resume prompt (typed into the stalled session) ──
@@ -136,13 +163,14 @@ _msg_ko() { case "$1" in
   title)          printf ' ⌘ Claude 세션 매니저 ' ;;
   daemon_on)      printf '● 자동재개 ON' ;;
   daemon_off)     printf '○ 자동재개 OFF' ;;
-  keys)           printf '  [a]접속 [n]새세션 [k]종료 [p]자동재개토글 [t]알림 [l]언어 [r]새로고침 [q]종료 · 새로고침 %%ss' ;;
+  keys)           printf '  [a]접속 [n]새세션 [k]종료 [p]자동재개토글 [y]자동승인 [t]알림 [l]언어 [r]새로고침 [q]종료 · 새로고침 %%ss' ;;
   no_session)     printf "세션 '%%s' 없음. [n] 으로 새 세션을 시작하세요." ;;
   st_working)     printf '🟢 작업중    ' ;;
   st_blocked)     printf '⛔ 차단      ' ;;
   st_limit)       printf '🟡 한도대기  ' ;;
   st_bg)          printf '🔵 백그라운드' ;;
   st_idle)        printf '⚪ 유휴      ' ;;
+  st_permission)  printf '🟣 승인대기  ' ;;
   st_orglimit)    printf '🟠 기업한도  ' ;;
   st_org_retry)   printf '· 재시도 %%s (%%s)' ;;
   st_org_blocked) printf '· 재시도 후 지속' ;;
@@ -157,7 +185,8 @@ _msg_ko() { case "$1" in
   row_active)     printf '· 활동 %%s' ;;
   row_inject)     printf '· 자동주입 %%s' ;;
   excluded)       printf '⏸제외' ;;
-  summary)        printf '%%d개 세션  ·  🟢 작업중 %%d  🔵 백그라운드 %%d  🟡 한도대기 %%d  ⛔ 차단 %%d  ⚪ 유휴 %%d' ;;
+  no_approve)     printf '⏸승인제외' ;;
+  summary)        printf '%%d개 세션  ·  🟢 작업중 %%d  🔵 백그라운드 %%d  🟡 한도대기 %%d  ⛔ 차단 %%d  🟣 승인대기 %%d  ⚪ 유휴 %%d' ;;
   recent_title)   printf '최근 자동재개 활동' ;;
   cancel)         printf '취소' ;;
   attach_list)    printf '접속할 창:' ;;
@@ -178,7 +207,23 @@ _msg_ko() { case "$1" in
   toggle_on)      printf "'%%s' 자동재개 ON" ;;
   toggle_off)     printf "'%%s' 자동재개 OFF (제외)" ;;
   notify_title)   printf '상태 전환 시 알림 (토글):' ;;
-  notify_prompt)  printf '번호 1-5 (esc=취소): ' ;;
+  notify_prompt)  printf '번호 1-6 (esc=취소): ' ;;
+  ap_title)       printf '권한 요청 자동승인:' ;;
+  ap_warn)        printf '켜 두는 동안은 rm·덮어쓰기·외부 전송도 사람 확인 없이 그대로 실행됩니다.' ;;
+  ap_master)      printf '자동승인' ;;
+  ap_mode)        printf '범위' ;;
+  ap_mode_perm)   printf '권한 요청만' ;;
+  ap_mode_all)    printf '모든 질문 (선택 질문·플랜 승인·폴더 신뢰까지)' ;;
+  ap_prefer)      printf '답변' ;;
+  ap_prefer_once) printf '예 (이번 한 번만)' ;;
+  ap_prefer_alw)  printf '예, 앞으로 묻지 않기 (선택지에 있을 때)' ;;
+  ap_perwin)      printf '창별 자동승인 제외...' ;;
+  ap_prompt)      printf '번호 1-4 (esc=취소): ' ;;
+  ap_win_prompt)  printf '창 이름 (esc=취소): ' ;;
+  ap_win_on)      printf "'%%s' 자동승인 ON" ;;
+  ap_win_off)     printf "'%%s' 자동승인 OFF (제외)" ;;
+  ap_filter)      printf '화면에 이 패턴이 있을 때만: %%s' ;;
+  ap_deny)        printf '화면에 이 패턴이 있으면 승인 안 함: %%s' ;;
   sh_no_session)  printf 'claude 세션 없음' ;;
   sh_attach_prompt) printf '번호/이름 (엔터=세션 전체): ' ;;
   sh_win_exists)  printf "이미 '%%s' 창이 있습니다. 접속: cba %%s" ;;
@@ -198,6 +243,8 @@ _msg_ko() { case "$1" in
   ntf_orglimit_body)    printf "'%%s' 기업 결제 한도 — 5시간 뒤 1회 재시도" ;;
   ntf_orgblocked_title) printf 'Claude: 차단(기업)' ;;
   ntf_orgblocked_body)  printf "'%%s' 재시도 후에도 한도 지속 — 차단 처리" ;;
+  ntf_permission_title) printf 'Claude: 승인 대기' ;;
+  ntf_permission_body)  printf "'%%s' 권한을 묻는 중 — 눌러주기 전엔 진행 못 함" ;;
   lg_state)       printf "%%s [%%s] %%s (window='%%s')" ;;
   lg_menu)        printf "🟡 한도 메뉴 → 'Stop and wait' 자동선택: %%s (window='%%s')" ;;
   lg_start)       printf 'watcher 시작 (session=%%s, interval=%%ss, gap=%%ss)' ;;
@@ -213,6 +260,12 @@ _msg_ko() { case "$1" in
   lg_orgretry)    printf "▶ 기업 한도 5시간 경과 → 1회 재시도 주입: %%s (window='%%s')" ;;
   lg_orgblocked)  printf "⛔ 기업 결제 한도 재시도 후에도 지속 — 차단: %%s (window='%%s')" ;;
   lg_gap)         printf '… %%s 세션한도 감지됐지만 최근 주입함 (gap 대기 중)' ;;
+  lg_ap_start)    printf '자동승인 ON (범위=%%s, 답변=%%s, 스캔=%%s초)' ;;
+  lg_approve)     printf "✔ 자동승인 [%%s] '%%s': %%s (window='%%s')" ;;
+  lg_ap_fail)     printf "자동승인 키 입력 실패, 재시도 예정: %%s (window='%%s')" ;;
+  lg_ap_excluded) printf "⏸ %%s 자동승인 제외됨: window='%%s'" ;;
+  lg_ap_deny)     printf "🛑 deny 패턴에 걸려 자동승인 안 함: %%s (window='%%s') — 수동 확인 필요" ;;
+  lg_ap_giveup)   printf "🟣 재시도 후에도 대화상자가 안 닫힘 — 사람에게 넘김: %%s (window='%%s')" ;;
   lbl_passed)     printf 'resets 경과' ;;
   lbl_unknown)    printf '시각 미상' ;;
   continue_prompt) printf '계속 진행해줘. 이전에 하던 작업을 끝까지 이어서 완료해.' ;;

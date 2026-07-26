@@ -81,12 +81,109 @@ notify_transition() {
     limit)      flag="${NOTIFY_LIMIT:-0}";       emoji="🟡"; sound="Basso" ;;
     orglimit)   flag="${NOTIFY_LIMIT:-0}";       emoji="🟠"; sound="Basso" ;;
     blocked)    flag="${NOTIFY_BLOCKED:-0}";     emoji="⛔"; sound="Basso" ;;
+    permission) flag="${NOTIFY_PERMISSION:-0}";  emoji="🟣"; sound="Basso" ;;
     idle)       flag="${NOTIFY_IDLE:-0}";        emoji="✅"; sound="Glass" ;;
     *) return ;;
   esac
   [ "$flag" = 1 ] && [ -n "$name" ] || return
   log "$(tf lg_state "$emoji" "$cur" "$TMUX_SESSION:$idx" "$name")"
   notify "$(t "ntf_${cur}_title")" "$(tf "ntf_${cur}_body" "$name")" "$sound"
+}
+
+# 승인 대기 창 하나를 처리: 긍정 선택지의 번호키를 눌러 그대로 진행시킨다.
+#   $1=window_index $2=window_name $3=화면내용 $4=now(epoch)
+# 누른 직후 화면을 다시 읽어 선택지 목록이 그대로면 그 키는 먹지 않은 것으로 보고 실패로
+# 센다. APPROVE_RETRY_GAP 뒤에 다시 눌러보되(키 유실 대비) APPROVE_MAX_TRIES 를 넘기면
+# 포기한다 — 판정이 틀렸을 때 입력창에 번호만 계속 쌓이는 것을 막는 안전장치다.
+approve_window() {
+  local idx="$1" name="$2" content="$3" now="$4"
+  local target="$TMUX_SESSION:$idx" af h prev ph pc pt pick plabel multi nf after ah
+  [ "${AUTO_APPROVE:-0}" = 1 ] || return 0
+
+  if is_noapprove "$name"; then
+    nf="$STATE/${TMUX_SESSION}-${idx}.apexcl"
+    if [ $(( now - $(_num "$nf") )) -ge "$MIN_RESEND_GAP" ]; then
+      echo "$now" > "$nf"; log "$(tf lg_ap_excluded "$target" "$name")"
+    fi
+    return 0
+  fi
+  # DENY 가 FILTER 보다 우선. 둘 다 화면 전체(대화상자 본문 포함)를 상대로 본다.
+  if [ -n "${AUTO_APPROVE_DENY:-}" ] && printf '%s' "$content" | grep -qiE "$AUTO_APPROVE_DENY"; then
+    nf="$STATE/${TMUX_SESSION}-${idx}.apdeny"
+    if [ $(( now - $(_num "$nf") )) -ge "$MIN_RESEND_GAP" ]; then
+      echo "$now" > "$nf"; log "$(tf lg_ap_deny "$target" "$name")"
+    fi
+    return 0
+  fi
+  if [ -n "${AUTO_APPROVE_FILTER:-}" ] && ! printf '%s' "$content" | grep -qiE "$AUTO_APPROVE_FILTER"; then
+    return 0
+  fi
+
+  pick="$(printf '%s' "$content" | approve_pick)"
+  [ -z "$pick" ] && return 0        # 고를 만한 긍정 선택지가 없음 → 사람에게 맡김
+
+  # 폭주 방지: 기억하는 것은 '화면 전체'가 아니라 '선택지 목록'의 해시다.
+  # 화면 전체를 쓰면 우리가 누른 숫자가 입력창에 찍히면서 화면이 매번 달라져 실패 카운트가
+  # 계속 0으로 돌아간다(= 오탐일 때 입력창에 숫자가 무한히 쌓인다). 선택지 목록은 판정이
+  # 틀려 대화상자가 아닌 본문을 잡은 경우 그대로 남아 있으므로, 그때만 카운트가 쌓인다.
+  af="$STATE/${TMUX_SESSION}-${idx}.aptry"
+  h="$(printf '%s' "$content" | approve_options | cksum | awk '{print $1}')"
+  # 상태파일이 없거나 비었을 때도 awk 가 '한 줄'을 보도록 개행을 붙인다(빈 문자열이면
+  # awk 는 아예 출력을 안 해 pc/pt 가 빈 값이 되고, 그 뒤 정수 비교가 깨진다).
+  prev="$(cat "$af" 2>/dev/null || echo)"
+  ph="$(printf '%s\n' "$prev" | awk '{print $1}')"
+  pc="$(printf '%s\n' "$prev" | awk '{print $2+0}')"
+  pt="$(printf '%s\n' "$prev" | awk '{print $3+0}')"
+  # 카운트는 '직전에 눌렀는데 아무 반응이 없었을 때'만 남아 있다. 반응이 있었으면 0 이라
+  # 이 관문을 그냥 통과한다 — 같은 문구('1. Yes / 2. No')의 요청이 연달아 와도 안 밀린다.
+  if [ "$pc" -gt 0 ] && [ "$ph" = "$h" ]; then
+    [ "$pc" -ge "${APPROVE_MAX_TRIES:-3}" ] && return 0             # 이미 포기함
+    [ $(( now - pt )) -lt "${APPROVE_RETRY_GAP:-45}" ] && return 0  # 방금 눌렀음, 반응 대기
+  fi
+
+  # 체크박스(multiSelect) 질문은 번호키가 '토글'이라 Right 로 제출 화면까지 넘긴다.
+  # 넘어간 제출 화면('1. Submit answers')은 다음 스캔에서 평범한 승인으로 처리된다.
+  multi=0; printf '%s' "$content" | match_checkbox && multi=1
+  if ! _t 8 tmux send-keys -t "$target" -l "$pick"; then
+    log "$(tf lg_ap_fail "$target" "$name")"; return 0
+  fi
+  if [ "$multi" = 1 ]; then sleep 0.5; _t 8 tmux send-keys -t "$target" Right; fi
+
+  # 누른 게 실제로 먹혔는지 바로 확인한다. 선택지 목록이 그대로면 그 키는 아무 일도 하지
+  # 않은 것 → 실패로 세고, APPROVE_MAX_TRIES 를 넘기면 그 화면은 사람에게 넘긴다.
+  sleep 1.5
+  after="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
+  ah="$(printf '%s' "$after" | approve_options | cksum | awk '{print $1}')"
+  if [ "$ah" = "$h" ] && [ "$(printf '%s' "$after" | classify)" = permission ]; then
+    pc=$((pc+1))
+  else
+    pc=0
+  fi
+  echo "$h $pc $now" > "$af"
+
+  plabel="$(printf '%s' "$content" | approve_options | awk -F'|' -v n="$pick" '$1==n{print $2}' | cut -c1-60)"
+  log "$(tf lg_approve "$pick" "$plabel" "$target" "$name")"
+  [ "$pc" -ge "${APPROVE_MAX_TRIES:-3}" ] && log "$(tf lg_ap_giveup "$target" "$name")"
+  return 0
+}
+
+# 승인 전용 짧은 스캔(INTERVAL 사이에 APPROVE_INTERVAL 마다 돈다).
+# 승인 대기는 한도와 달리 저절로 풀리지 않아 빨리 눌러줄수록 좋다. capture-pane 만 해서
+# 비용은 무시할 수준이고, 한도 관련 액션은 여기서 절대 하지 않는다(scan_once 전용).
+approve_scan() {
+  [ "${AUTO_APPROVE:-0}" = 1 ] || return 0
+  _t 8 tmux has-session -t "$TMUX_SESSION" 2>/dev/null || return 0
+  local idx name content
+  while read -r idx; do
+    case "$idx" in ''|*[!0-9]*) continue ;; esac
+    name="$(_t 8 tmux display-message -p -t "$TMUX_SESSION:$idx" '#{window_name}' 2>/dev/null)"
+    [ -z "$name" ] && continue
+    content="$(_t 8 tmux capture-pane -p -t "$TMUX_SESSION:$idx" 2>/dev/null | tail -n "$CAPTURE_LINES")"
+    [ -z "$content" ] && continue
+    # classify 로 최종 확인 — 한도/작업중이 먼저 잡히면 그쪽이 우선이므로 손대지 않는다.
+    [ "$(printf '%s' "$content" | classify)" = permission ] || continue
+    approve_window "$idx" "$name" "$content" "$(date +%s)"
+  done < <(_t 8 tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}' 2>/dev/null)
 }
 
 scan_once() {
@@ -170,6 +267,13 @@ scan_once() {
       continue
     fi
 
+    # 승인 대기(권한 요청·질문 대화상자) → AUTO_APPROVE=1 이면 긍정 선택지를 눌러 진행.
+    # 꺼져 있으면 아무것도 하지 않는다(위 상태 전이 알림만 나감).
+    if [ "$state" = permission ]; then
+      approve_window "$idx" "$name" "$content" "$now"
+      continue
+    fi
+
     # limit 외 상태(working/background/idle/blocked)는 데몬 자동재개 액션 없음.
     [ "$state" = limit ] || continue
 
@@ -234,8 +338,24 @@ scan_once() {
 # 편집돼도 bash 가 루프 본문을 중간부터 재읽기해 깨지는 일이 없음(라이브 편집 안전).
 main() {
   log "$(tf lg_start "$TMUX_SESSION" "$INTERVAL" "$MIN_RESEND_GAP")"   # 시작 로그는 여기서만
-  while true; do scan_once; sleep "$INTERVAL"; done
+  [ "${AUTO_APPROVE:-0}" = 1 ] && log "$(tf lg_ap_start "${AUTO_APPROVE_MODE:-all}" "${AUTO_APPROVE_PREFER:-once}" "${APPROVE_INTERVAL:-0}")"
+  local waited
+  while true; do
+    scan_once
+    # 자동승인이 켜져 있고 주기가 INTERVAL 보다 짧으면, 한 사이클을 잘게 쪼개 그 사이에
+    # 승인 전용 스캔을 돌린다. 승인 대기는 눌러줄 때까지 세션이 그냥 서 있으므로,
+    # 한도 스캔 주기(60초)를 기다리게 두면 그만큼 통째로 놀게 된다.
+    if [ "${AUTO_APPROVE:-0}" = 1 ] && [ "${APPROVE_INTERVAL:-0}" -gt 0 ] && [ "$APPROVE_INTERVAL" -lt "$INTERVAL" ]; then
+      waited=0
+      while [ "$waited" -lt "$INTERVAL" ]; do
+        sleep "$APPROVE_INTERVAL"; waited=$((waited+APPROVE_INTERVAL)); approve_scan
+      done
+    else
+      sleep "$INTERVAL"
+    fi
+  done
 }
 
 if [ "${1:-}" = "--once" ]; then scan_once; exit 0; fi
+if [ "${1:-}" = "--approve-once" ]; then approve_scan; exit 0; fi
 main

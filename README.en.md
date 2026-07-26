@@ -5,6 +5,7 @@
 Run Claude Code long enough and it hits the 5-hour usage limit and stops.
 If that happens while you're asleep or away from the keyboard, nobody presses continue when the limit lifts, so the work just sits there.
 claude-autoresume notices a session that stopped on the limit and, once the reset time passes, sends it a "continue" message so it picks up where it left off.
+Permission prompts stall a session the same way, and those never clear on their own, so it can answer those too when you ask it to.
 It watches many sessions at once, and the csm dashboard shows and controls all of them at a glance.
 
 ---
@@ -104,7 +105,7 @@ Press `l` to switch to Korean.
 
 Each row is one window and shows, in order, the window name, the profile, the state, the usage left, the last activity time, the last auto-resume time, and whether the window is excluded from auto-resume.
 
-There are six states.
+There are seven states.
 
 - working — the agent is actually generating a response.
   This state only shows when `esc to interrupt` is on screen.
@@ -116,6 +117,9 @@ There are six states.
   Rather than blocking right away it retries once after 5 hours, and shows the scheduled retry time.
 - blocked — a weekly limit where auto-resume makes no sense.
   It only notifies, and you handle it yourself.
+- needs-ok — Claude is asking permission, or waiting on a choice you have to make.
+  The first option is shown alongside it so you can see what's being asked.
+  Unlike a limit, this never clears on its own.
 - idle — genuinely stopped and waiting for your input, either finished or asking a question.
 
 The keys are:
@@ -124,6 +128,7 @@ The keys are:
 - `n` create a new session
 - `k` kill a session
 - `p` turn per-window auto-resume on or off
+- `y` configure auto-approval of permission prompts
 - `t` configure per-state alerts
 - `l` change the language between en and ko, applied to the daemon too
 - `r` refresh, `q` quit
@@ -183,11 +188,67 @@ You can also list window names, one per line, in `disabled.list`.
 
 ---
 
+## Auto-approving permission prompts
+
+Limits aren't the only thing that stalls a session.
+Before anything hard to undo — an `rm`, a write outside the working folder — Claude asks for approval and stops there waiting for an answer.
+A limit clears when its reset time passes; this one waits forever until somebody presses a key.
+While you're away it stalls work far more often than limits do.
+
+It's off by default.
+Turned on, the daemon finds the dialog and presses the number key for the option that means "yes".
+Press `y` in csm to open the settings.
+
+```
+1) [ON ] auto-approve
+2) scope: every prompt (questions, plans, folder trust)
+3) answer: Yes (this time only)
+4) exclude a window from auto-approve...
+```
+
+There are two scopes.
+`permission prompts only` answers just the tool-permission dialogs, the ones that read `Do you want to proceed?`.
+`every prompt` also answers choice questions, plan approvals, and folder-trust prompts by picking the first usable option.
+Use `every prompt` when you're stepping away entirely, and `permission prompts only` when you want approvals handled but judgment calls left for you.
+
+There are two answers.
+`Yes (this time only)` picks "Yes" and lets that single request through.
+`Yes, and don't ask again` picks the "don't ask again" option when one is offered, which lets the same kind of request through for the rest of the session.
+That means fewer questions but a wider blanket, so the default is the narrow one.
+
+Approval can be turned off per window too.
+Pick `4`, enter a window name, and that window is skipped; you can also write names into `noapprove.list` directly.
+Windows excluded from auto-resume (`disabled.list`) are excluded from auto-approval as well.
+
+To narrow or block it, use two values in `config.sh`.
+`AUTO_APPROVE_FILTER` takes a regex and only approves when the screen matches it.
+To let only `rm` through, write `AUTO_APPROVE_FILTER="rm "`.
+`AUTO_APPROVE_DENY` is the opposite — it never approves when the screen matches, and it wins over `FILTER`.
+Something like `AUTO_APPROVE_DENY="sudo|rm -rf /|--force"` leaves just the dangerous cases for a human.
+
+Prompts are worth answering fast, so this runs separately from the limit check (60s).
+A light screen-only scan every `APPROVE_INTERVAL` seconds (10 by default) fills the gap.
+
+Two safeguards sit behind it.
+After each keypress the screen is read again, and if the option list is unchanged that key did nothing, which counts as a failure.
+Past `APPROVE_MAX_TRIES` (3 by default) the screen is left alone for you to handle.
+That stops digits from piling up in the input box when the detection was wrong.
+On top of that, nothing is pressed at all when no option means "yes".
+Options like `No`, `Cancel`, `Type something`, and `Chat about this` are never picked, even when numbered first.
+
+Know what you're turning on.
+The moment auto-approval is on, nobody gets a second look.
+Deletions, overwrites, and outbound requests all go through.
+Turn it on only for windows whose work you can afford, and exclude the rest per window.
+
+---
+
 ## Per-state alerts
 
 When a window changes into a state, you get one macOS notification.
-By default only limit-wait, blocked, and idle are on.
+By default limit-wait, blocked, needs-ok, and idle are on.
 Working and background change too often, so they're off.
+The needs-ok alert earns its keep on windows where auto-approval is off, since nothing moves until somebody presses a key.
 Press `t` in csm to toggle them, and the setting is saved to `notify.conf` and shared with the daemon.
 An alert only fires when the state holds steady for two checks in a row, which avoids flicker.
 
@@ -208,6 +269,16 @@ An alert only fires when the state holds steady for two checks in a row, which a
 | `USAGE_REGEX_SHORT`, `USAGE_REGEX_LONG` | `Nh N% left`, `Nd N% left` | usage-left parsing, for a custom statusline only |
 | `NOTIFY_WORKING`, `NOTIFY_BACKGROUND` | 0, 0 | alert on change to working, background |
 | `NOTIFY_LIMIT`, `NOTIFY_BLOCKED`, `NOTIFY_IDLE` | 1, 1, 1 | alert on change to limit-wait, blocked, idle |
+| `NOTIFY_PERMISSION` | 1 | alert on change to needs-ok |
+| `AUTO_APPROVE` | 0 | auto-approve permission prompts. Toggled by `y` in csm |
+| `AUTO_APPROVE_MODE` | `all` | `permission` for tool prompts only, `all` for every choice dialog |
+| `AUTO_APPROVE_PREFER` | `once` | `once` picks "Yes", `always` prefers "Yes, and don't ask again" |
+| `AUTO_APPROVE_FILTER` | none | only approve when the screen matches this. e.g. `rm ` |
+| `AUTO_APPROVE_DENY` | none | never approve when the screen matches this. Wins over `FILTER` |
+| `APPROVE_INTERVAL` | 10 | seconds between approval-only scans. 0 checks only every `INTERVAL` |
+| `APPROVE_RETRY_GAP` | 45 | seconds before pressing again when the dialog didn't close |
+| `APPROVE_MAX_TRIES` | 3 | max attempts per dialog. Past this it's left for you |
+| `APPROVE_*_REGEX` family | … | dialog and option detection patterns. Fix these if Claude's wording changes |
 | `INTERVAL` | 60 | check interval, seconds |
 | `MIN_RESEND_GAP` | 540 | minimum gap before sending or alerting the same window again, seconds |
 | `RESET_BUFFER` | 30 | send this many seconds after the reset time |
@@ -227,6 +298,8 @@ A few things can also be set through environment variables.
 - `CAR_LABEL` — the launchd label.
   Default is `com.claude-autoresume`.
 - `CAR_CONTINUE_PROMPT` — set the "continue" text yourself.
+- `CAR_AUTO_APPROVE`, `CAR_AUTO_APPROVE_MODE`, `CAR_AUTO_APPROVE_PREFER`, `CAR_AUTO_APPROVE_FILTER`, `CAR_AUTO_APPROVE_DENY` — run auto-approval with different settings just once.
+  These win over whatever is saved in `approve.conf`.
 - `CAR_LOCALE` — the locale that forces the daemon to read tmux output as UTF-8.
   Default is `en_US.UTF-8`, and it only applies when the locale is empty or C/POSIX.
 - `TMUX_TMPDIR` — the tmux socket location.
@@ -259,20 +332,25 @@ The daemon reads the script once at startup, so if you edit a file without resta
   Add or edit wording here.
 - `autoresume.sh` — the watcher daemon.
   Try one pass with `bash autoresume.sh --once`.
+  `--approve-once` runs only the approval scan.
 - `session-manager.sh` — the dashboard, csm.
 - `shell-functions.zsh` — the shell functions like cbg, cba, csm.
 - `install.sh`, `uninstall.sh` — install and remove.
 - `disabled.list` — windows excluded from auto-resume.
   Created at runtime, optional.
+- `noapprove.list` — windows excluded from auto-approval only.
+  Created by `y` in csm, optional.
 - `lang` — the UI language setting.
   Toggled by `l` in csm, created at runtime.
 - `notify.conf` — the per-state alert setting.
   Toggled by `t` in csm, created at runtime.
+- `approve.conf` — the auto-approval setting.
+  Changed by `y` in csm, created at runtime.
 - `autoresume.log`, `state/`, `.sm/` — logs, state, and cache.
   Created at runtime.
 
 `.gitignore` keeps runtime files and personal traces out of the repo.
-That covers `state/`, `.sm/`, `disabled.list`, `lang`, `notify.conf`, and the log files.
+That covers `state/`, `.sm/`, `disabled.list`, `noapprove.list`, `lang`, `notify.conf`, `approve.conf`, and the log files.
 No usernames, emails, absolute paths, or personal profile names are baked into the code.
 Profiles, paths, and the tmux location are all found at runtime.
 

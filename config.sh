@@ -30,6 +30,8 @@ TMUX_SESSION="${CAR_SESSION:-claude}"
 CONTINUE_PROMPT="${CAR_CONTINUE_PROMPT:-$(t continue_prompt)}"
 # 자동재개에서 제외할 창 이름 목록 파일 (창별 on/off)
 DISABLED_LIST="$_CFG_DIR/disabled.list"
+# 자동승인에서만 제외할 창 이름 목록 파일 (자동재개는 그대로 두고 승인만 끔)
+NOAPPROVE_LIST="$_CFG_DIR/noapprove.list"
 
 # ── 한도 문구 3분류 (대소문자 무시) ─────────────────────────────────────────
 # (A) RESUME_REGEX : 자동 이어가기 대상. 5h 세션 한도 → resets 후 풀림.
@@ -65,6 +67,41 @@ LIMIT_MENU_ACTIVE="enter to confirm|esc to cancel|❯ *1\."
 # 를 background 보다 먼저 본다(아래 classify 주석 참고).
 BACKGROUND_REGEX="[0-9]+ shells? still running|· [0-9]+ shell|running in the background|waiting for [0-9]+ (background |dynamic )?(agent|workflow|shell)|[0-9]+/[0-9]+ agents|← [0-9]+ agents?|↓ [0-9][0-9.,]*[km]? tokens|[0-9]+m [0-9]+s · ↓"
 
+# ── 승인 대기 대화상자 (자동승인 기능) ──────────────────────────────────────
+# Claude 가 도구 실행 권한을 물을 때(rm 같은 명령, 작업폴더 밖 파일 쓰기, WebFetch 등)와
+# AskUserQuestion/플랜 승인처럼 사용자의 '선택'을 기다릴 때는 세션이 그 자리에서 멈춘다.
+# 한도와 달리 시간이 지나도 저절로 풀리지 않으므로, 자리를 비운 사이엔 이게 더 자주 세션을
+# 세운다. 아래 패턴들로 '지금 열려 있는 선택 대화상자'를 찾아 상태를 permission 으로 잡고,
+# AUTO_APPROVE=1 이면 데몬이 긍정 선택지의 번호키를 눌러 그대로 진행시킨다.
+#
+# 실제 화면 예 (claude 2.1.x):
+#    Do you want to proceed?
+#    ❯ 1. Yes
+#      2. Yes, and allow access to foo/ and similar commands
+#      3. No
+#
+#    Esc to cancel · Tab to amend
+#
+# APPROVE_CURSOR : 선택 커서가 번호 옵션 위에 있는 줄 = '대화상자가 열려 있음'의 핵심 증거.
+#                  (닫힌 뒤엔 화면에서 사라지므로 스크롤백 잔상과 구분된다)
+APPROVE_CURSOR="^[[:space:]]*❯[[:space:]]*[0-9]{1,2}\."
+# APPROVE_ASK    : 도구 권한 요청 특유의 질문 문구. mode=permission 일 때 이것만 인정한다.
+#                  'Ready to submit'은 multiSelect 질문의 2단계(제출 확인) 화면.
+APPROVE_ASK="do you want to (proceed|create|make this edit|allow|use this api key|continue)|would you like to proceed|ready to submit your answers"
+# APPROVE_FOOTER : 선택 대화상자 공통 하단 안내. mode=all 일 때 AskUserQuestion·폴더신뢰
+#                  같이 질문 문구가 자유로운 대화상자까지 잡기 위한 보조 증거.
+APPROVE_FOOTER="esc to cancel|enter to confirm|enter to select|tab to amend|shift\+tab to approve"
+# APPROVE_YES    : '그대로 진행' 선택지. 여기 맞는 선택지가 있으면 항상 이걸 우선한다.
+APPROVE_YES="^yes([,. ]|$)|^submit answers|^continue([,. ]|$)"
+# APPROVE_ALWAYS : '앞으로 묻지 않기' 선택지. AUTO_APPROVE_PREFER=always 일 때만 우선.
+#                  세션 내내 규칙이 추가되므로 승인 횟수는 줄지만 그만큼 범위가 넓어진다.
+APPROVE_ALWAYS="^yes,? and (don'?t ask again|allow)|^yes, allow all|^yes, during this session|^yes,? and use auto mode"
+# APPROVE_NEVER  : 절대 고르면 안 되는 선택지(거부/취소/자유입력). 번호가 1번이어도 건너뛴다.
+APPROVE_NEVER="^no([,. ]|$)|^cancel|^type something|^chat about this|^tell claude|^don'?t|^exit|^quit|^keep planning|^refine"
+# APPROVE_CHECKBOX : multiSelect 질문의 체크박스. 이게 보이면 번호키는 '토글'이라
+#                  번호키 → Right(제출 화면으로) 2단계로 처리한다.
+APPROVE_CHECKBOX="^[[:space:]]*(❯[[:space:]]*)?[0-9]{1,2}\.[[:space:]]*\[[[:space:]✔x]\]"
+
 # 메인 에이전트가 '실제로 생성 중'일 때만 뜨는 문구 → '🟢 작업중' 판정.
 # (화면 해시 변화만으로 판정하면 프롬프트 타이핑·/status 등도 작업중으로 오판되므로,
 #  Claude TUI 가 생성 중에만 보여주는 'esc to interrupt' 스피너 문구를 앵커로 사용.)
@@ -85,8 +122,45 @@ NOTIFY_BACKGROUND=0   # → 🔵 백그라운드 전환 시
 NOTIFY_LIMIT=1        # → 🟡 한도대기 전환 시
 NOTIFY_BLOCKED=1      # → ⛔ 차단 전환 시
 NOTIFY_IDLE=1         # → ⚪ 유휴(완료/입력대기) 전환 시
+NOTIFY_PERMISSION=1   # → 🟣 승인대기 전환 시 (자동승인이 꺼져 있을 때 특히 유용)
 # csm 에서 't'(알림설정)로 토글하면 아래 파일에 저장돼 위 기본값을 덮어씀(데몬도 공유)
 [ -f "$_CFG_DIR/notify.conf" ] && source "$_CFG_DIR/notify.conf"
+
+# ── 자동승인 (기본 꺼짐) ────────────────────────────────────────────────────
+# 1 이면 승인대기(permission) 상태의 창에서 긍정 선택지를 데몬이 눌러 그대로 진행시킨다.
+# 켜는 순간 '사람이 한 번 더 볼 기회'가 사라진다. rm·파일 덮어쓰기·외부 전송 같은 되돌리기
+# 어려운 작업도 그냥 통과하므로, 감당할 수 있는 작업 창에서만 켜세요.
+AUTO_APPROVE=0
+# permission = 도구 권한 요청만 승인(APPROVE_ASK 문구가 있는 것만). 보수적.
+# all        = 위에 더해 AskUserQuestion·플랜 승인·폴더 신뢰 같은 모든 선택 대화상자까지
+#              1번(긍정) 선택지로 답한다. 자리를 완전히 비울 때 쓰는 값.
+AUTO_APPROVE_MODE=all
+# once   = '예'(이번 한 번만)를 고름. 매번 다시 물어보지만 범위가 가장 좁다.
+# always = '예, 앞으로 묻지 않기' 선택지가 있으면 그걸 고름. 질문 수는 줄지만 그 세션 내내
+#          같은 종류의 요청이 프리패스가 된다.
+AUTO_APPROVE_PREFER=once
+# 승인할 대화상자를 좁히는 정규식(대소문자 무시). 화면에 이 패턴이 있을 때만 승인한다.
+# 빈 값이면 제한 없음. 예) rm 명령만 자동승인: AUTO_APPROVE_FILTER="rm "
+AUTO_APPROVE_FILTER=""
+# 이 패턴이 화면에 있으면 절대 승인하지 않는다(FILTER 보다 우선). 빈 값이면 없음.
+# 예) AUTO_APPROVE_DENY="sudo|rm -rf /|git push|--force"
+AUTO_APPROVE_DENY=""
+APPROVE_INTERVAL=10   # 승인 전용 짧은 스캔 주기(초). 0 이면 INTERVAL 마다만 확인.
+                      # 승인 대기는 시간이 지나도 안 풀려서, 한도 스캔(60초)과 달리 빨리
+                      # 눌러줄수록 좋다. capture-pane 만 해서 비용은 무시할 수준.
+APPROVE_RETRY_GAP=45  # 같은 대화상자가 안 닫히면 이 초 뒤 다시 눌러본다(키 유실 대비)
+APPROVE_MAX_TRIES=3   # 같은 대화상자에 이 횟수까지만 시도. 넘으면 포기하고 사람을 기다린다
+                      # (판정이 틀렸을 때 입력창에 번호가 무한히 쌓이는 것을 막는 안전장치)
+# csm 에서 'y'(자동승인)로 바꾸면 아래 파일에 저장돼 위 기본값을 덮어씀(데몬도 공유)
+[ -f "$_CFG_DIR/approve.conf" ] && source "$_CFG_DIR/approve.conf"
+# 환경변수는 마지막에 적용돼 파일 설정까지 이긴다(한 번만 다르게 돌려보고 싶을 때).
+AUTO_APPROVE="${CAR_AUTO_APPROVE:-$AUTO_APPROVE}"
+AUTO_APPROVE_MODE="${CAR_AUTO_APPROVE_MODE:-$AUTO_APPROVE_MODE}"
+AUTO_APPROVE_PREFER="${CAR_AUTO_APPROVE_PREFER:-$AUTO_APPROVE_PREFER}"
+AUTO_APPROVE_FILTER="${CAR_AUTO_APPROVE_FILTER:-$AUTO_APPROVE_FILTER}"
+AUTO_APPROVE_DENY="${CAR_AUTO_APPROVE_DENY:-$AUTO_APPROVE_DENY}"
+case "$AUTO_APPROVE_MODE"   in permission|all) ;; *) AUTO_APPROVE_MODE=all ;; esac
+case "$AUTO_APPROVE_PREFER" in once|always)    ;; *) AUTO_APPROVE_PREFER=once ;; esac
 INTERVAL=60           # 감시 주기(초). 짧을수록 리셋 직후 빨리 이어감(capture라 비용 무시)
 MIN_RESEND_GAP=540    # 같은 창 재주입/재알림 최소 간격(초)
 RESET_BUFFER=30       # resets 시각 + 이 여유(초) 뒤부터 주입
@@ -136,8 +210,76 @@ match_limit_menu() {
     && printf '%s' "$c" | grep -qiE "$LIMIT_MENU_ACTIVE"
 }
 
+# ── 승인 대기 대화상자 판정/파싱 ────────────────────────────────────────────
+# 화면(stdin)에서 번호 선택지 목록을 뽑아 "번호|라벨" 로 출력.
+#   · 선택 커서('❯')는 공백으로 지워 커서가 어디 있든 같은 결과가 나오게 한다.
+#   · 같은 번호가 여러 번 나오면 '화면 아래쪽 것'만 남긴다(스크롤백의 옛 목록 무시).
+#   · 1번부터 끊기지 않고 이어지는 번호까지만 인정한다. 파일 diff 안의 '12. 항목' 같은
+#     본문 텍스트가 우연히 선택지로 잡히는 것을 막는 장치(대화상자는 항상 1번부터다).
+approve_options() {
+  local c line num label prev
+  c="$(cat)"
+  printf '%s\n' "$c" \
+    | sed -e 's/❯/ /g' \
+    | grep -E '^[[:space:]]*[0-9]{1,2}\.[[:space:]]' \
+    | sed -E 's/^[[:space:]]*([0-9]{1,2})\.[[:space:]]+/\1|/' \
+    | awk -F'|' '{ last[$1]=$0; if (!($1 in seen)) { seen[$1]=1; order[++n]=$1 } }
+                 END { for (i=1;i<=n;i++) print last[order[i]] }' \
+    | sort -t'|' -k1,1n \
+    | awk -F'|' 'BEGIN{want=1} $1==want { print; want++ }'
+}
+
+# 지금 화면에 '열려 있는' 선택 대화상자가 있나. 커서 줄 + (질문 문구 | 하단 안내) 둘 다 필요.
+#   mode=permission 이면 도구 권한 질문(APPROVE_ASK)만 인정한다.
+match_permission() {
+  local c; c="$(cat)"
+  printf '%s' "$c" | grep -qE "$APPROVE_CURSOR" || return 1
+  # 한도 메뉴는 한도 로직이 전담한다. 여기서 손대면 'Continue with a different model' 같은
+  # 선택지를 긍정으로 오인해 모델을 바꿔 버릴 수 있다(classify 가 먼저 걸러 주지만,
+  # 메뉴 판정이 어긋난 경우까지 대비해 여기서도 막는다).
+  printf '%s' "$c" | grep -qiE "$LIMIT_MENU_OPT" && return 1
+  printf '%s' "$c" | grep -qiE "$APPROVE_ASK" && return 0
+  [ "${AUTO_APPROVE_MODE:-all}" = all ] || return 1
+  printf '%s' "$c" | grep -qiE "$APPROVE_FOOTER"
+}
+
+# 화면(stdin)에서 누를 선택지 번호를 출력. 누르면 안 되면 빈값.
+#   우선순위: PREFER=always 면 '앞으로 묻지 않기' → 없으면 '예' → mode=all 이면 첫 유효 선택지
+approve_pick() {
+  local c opts num label pick_yes="" pick_always="" pick_first=""
+  c="$(cat)"
+  opts="$(printf '%s' "$c" | approve_options)"
+  [ -z "$opts" ] && return 0
+  while IFS='|' read -r num label; do
+    [ -z "$num" ] && continue
+    [ "$num" -gt 9 ] && continue                      # 번호키 하나로 못 누름 → 사람에게 맡김
+    label="$(printf '%s' "$label" | sed -E 's/^\[[^]]*\][[:space:]]*//' | tr 'A-Z' 'a-z')"
+    printf '%s' "$label" | grep -qE "$APPROVE_NEVER" && continue
+    [ -z "$pick_first" ] && pick_first="$num"
+    [ -z "$pick_always" ] && printf '%s' "$label" | grep -qE "$APPROVE_ALWAYS" && pick_always="$num"
+    [ -z "$pick_yes" ]    && printf '%s' "$label" | grep -qE "$APPROVE_YES"    && pick_yes="$num"
+  done <<EOF
+$opts
+EOF
+  if [ "${AUTO_APPROVE_PREFER:-once}" = always ] && [ -n "$pick_always" ]; then printf '%s' "$pick_always"; return 0; fi
+  [ -n "$pick_yes" ] && { printf '%s' "$pick_yes"; return 0; }
+  [ "${AUTO_APPROVE_MODE:-all}" = all ] && printf '%s' "$pick_first"
+  return 0
+}
+
+# multiSelect 질문인가(선택지에 체크박스가 있나). 번호키가 '확정'이 아니라 '토글'이라
+# 누른 뒤 Right 로 제출 화면까지 넘겨야 한다.
+match_checkbox() { grep -qE "$APPROVE_CHECKBOX" 2>/dev/null; }
+
+# 창 이름이 자동승인 제외 목록에 있나 (자동재개 제외(disabled.list)도 자동승인을 막는다)
+is_noapprove() {
+  [ -n "$1" ] || return 0
+  is_disabled "$1" && return 0
+  [ -f "$NOAPPROVE_LIST" ] && grep -qxF "$1" "$NOAPPROVE_LIST"
+}
+
 # 화면 내용(stdin)을 단일 상태로 분류(csm·데몬 공용). 우선순위 순서:
-#   working | limit(활성 메뉴) | blocked | orglimit | limit(텍스트) | background | idle
+#   working | limit(활성 메뉴) | blocked | orglimit | limit(텍스트) | permission | background | idle
 # · working(esc to interrupt)이 최우선: 메인 에이전트가 지금 생성 중이면 무조건 작업중.
 #   재개 후 다시 돌기 시작하면 이 신호가 떠서, 옛 한도 배너가 화면에 남아 있어도 limit 로
 #   오판하지 않는다(재주입 방지의 1차 방어선).
@@ -150,6 +292,9 @@ match_limit_menu() {
 #   가 한도보다 먼저면 진짜 멈춘 한도가 background 로 가려져 재개가 안 된다. 실제로 작업이
 #   도는 중이면 위의 working(esc to interrupt)이 먼저 잡으므로, 여기서 한도를 먼저 봐도
 #   '재개 후 아직 도는 세션'을 한도로 오판하지 않는다.
+# · permission(승인 대기 대화상자)은 한도 판정을 모두 마친 뒤에 본다. 한도 처리 로직을
+#   건드리지 않기 위해서다. 대신 background 보다는 먼저 봐야 한다 — 백그라운드 셸이 도는
+#   중에도 권한 질문은 뜨고, 그때 background 로 가려지면 아무도 눌러주지 않는다.
 classify() {
   local c; c="$(cat)"
   if   printf '%s' "$c" | match_working;     then printf working
@@ -157,6 +302,7 @@ classify() {
   elif printf '%s' "$c" | match_blocked;     then printf blocked
   elif printf '%s' "$c" | match_orglimit;    then printf orglimit
   elif printf '%s' "$c" | match_resume;      then printf limit
+  elif printf '%s' "$c" | match_permission;  then printf permission
   elif printf '%s' "$c" | match_background;  then printf background
   else printf idle; fi
 }

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================================
 # Claude 세션 매니저 (csm) — tmux 컨트롤 패널 겸 실시간 대시보드
-#  표시: 창별 프로필 / 상태(🟢작업 🔵백그라운드 🟡한도대기 ⛔차단 ⚪유휴) / 사용량 잔량 /
-#        resets 카운트다운 / 자동주입 이력 / ⏸자동재개 제외
-#  키:  a 접속(창 선택)  n 새 세션  k 세션 종료  p 자동재개 토글  t 알림 설정
-#       l 언어 토글  r 새로고침  q 종료
+#  표시: 창별 프로필 / 상태(🟢작업 🔵백그라운드 🟡한도대기 ⛔차단 🟣승인대기 ⚪유휴) /
+#        사용량 잔량 / resets 카운트다운 / 자동주입 이력 / ⏸자동재개 제외
+#  키:  a 접속(창 선택)  n 새 세션  k 세션 종료  p 자동재개 토글  y 자동승인 설정
+#       t 알림 설정  l 언어 토글  r 새로고침  q 종료
 # ============================================================================
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +59,9 @@ daemon() {
   if launchctl list 2>/dev/null | grep -q "$DAEMON_LABEL"; then
     printf '%s%s%s' "$GRN" "$(t daemon_on)" "$R"
   else printf '%s%s%s' "$RED" "$(t daemon_off)" "$R"; fi
+  # 자동승인은 켜져 있을 때만 표시한다(꺼져 있는 게 기본이라 굳이 자리를 차지할 필요 없음).
+  [ "${AUTO_APPROVE:-0}" = 1 ] && printf '   %s✔ %s: %s%s' "$MAG" "$(t ap_master)" \
+    "$([ "${AUTO_APPROVE_MODE:-all}" = all ] && t ap_mode_all || t ap_mode_perm)" "$R"
 }
 
 draw() {
@@ -73,7 +76,7 @@ draw() {
     return
   fi
 
-  local n=0 working=0 bg=0 limited=0 blocked=0 idle=0
+  local n=0 working=0 bg=0 limited=0 blocked=0 idle=0 perm=0
   while IFS=$'\t' read -r idx name; do
     [ -z "$idx" ] && continue
     n=$((n+1))
@@ -110,6 +113,10 @@ draw() {
                       status="$status ${D}$(t st_org_due)${R}"       # 예정시각 지남, 곧 재시도
                     fi
                   fi ;;
+      permission) status="${MAG}$(t st_permission)${R}"; perm=$((perm+1))
+                  # 무엇을 물어보는지 한 줄 요약(첫 번째 선택지)까지 붙여 준다.
+                  local po; po="$(printf '%s' "$cur" | approve_options | head -1 | cut -d'|' -f2 | cut -c1-34)"
+                  [ -n "$po" ] && status="$status ${D}· 1. ${po}${R}" ;;
       background) status="${BLU}$(t st_bg)${R}"; bg=$((bg+1)) ;;
       *)          status="${GRY}$(t st_idle)${R}"; idle=$((idle+1)) ;;
     esac
@@ -130,7 +137,9 @@ draw() {
     ustr=""; [ -n "$usage" ] && ustr="  ${D}· ${usage}${R}"
     inj=""; sf="$STATE/${TMUX_SESSION}-${idx}.last"
     [ -f "$sf" ] && inj="  ${D}$(printf "$(t row_inject)" "$(ago $((now-$(cat "$sf"))))")${R}"
-    dis=""; is_disabled "$name" && dis="  ${RED}$(t excluded)${R}"
+    dis=""
+    if is_disabled "$name"; then dis="  ${RED}$(t excluded)${R}"
+    elif [ "${AUTO_APPROVE:-0}" = 1 ] && is_noapprove "$name"; then dis="  ${RED}$(t no_approve)${R}"; fi
     local act; act="$(printf "$(t row_active)" "$(ago $((now-lastchg)))")"
 
     printf "  %s%-14s%s %b %b  %s%s%s%s%s%s\n" \
@@ -138,11 +147,11 @@ draw() {
   done < <($T list-windows -t "$TMUX_SESSION" -F '#{window_index}	#{window_name}' 2>/dev/null)
 
   printf "\n  %s$(t summary)%s\n" \
-    "$D" "$n" "$working" "$bg" "$limited" "$blocked" "$idle" "$R"
+    "$D" "$n" "$working" "$bg" "$limited" "$blocked" "$perm" "$idle" "$R"
 
-  # 로그의 주요 이벤트를 언어 무관하게 이모지 마커로 추림(주입 ▶ / 상태전이 🟢🔵🟡⛔✅)
+  # 로그의 주요 이벤트를 언어 무관하게 이모지 마커로 추림(주입 ▶ / 승인 ✔ / 상태전이 🟢🔵🟡🟣⛔✅)
   local recent
-  recent="$(grep -aE '\] (▶|⛔|✅|🟢|🔵|🟡)' "$DIR/autoresume.log" 2>/dev/null | tail -4)"
+  recent="$(grep -aE '\] (▶|✔|🛑|⛔|✅|🟢|🔵|🟡|🟣)' "$DIR/autoresume.log" 2>/dev/null | tail -4)"
   if [ -n "$recent" ]; then
     printf "\n  %s$(t recent_title)%s\n" "$B" "$R"
     printf '%s\n' "$recent" | sed "s/^/    $D/; s/\$/$R/"
@@ -259,8 +268,8 @@ action_lang() {
 
 # 상태별 알림 on/off 설정: notify.conf 에 저장(데몬도 공유), 즉시 반영.
 action_notify() {
-  local keys=(NOTIFY_WORKING NOTIFY_BACKGROUND NOTIFY_LIMIT NOTIFY_BLOCKED NOTIFY_IDLE)
-  local labels=("$(t st_working)" "$(t st_bg)" "$(t st_limit)" "$(t st_blocked)" "$(t st_idle)")
+  local keys=(NOTIFY_WORKING NOTIFY_BACKGROUND NOTIFY_LIMIT NOTIFY_BLOCKED NOTIFY_IDLE NOTIFY_PERMISSION)
+  local labels=("$(t st_working)" "$(t st_bg)" "$(t st_limit)" "$(t st_blocked)" "$(t st_idle)" "$(t st_permission)")
   echo; printf "  %s\n" "$(t notify_title)"
   local i k v
   for i in "${!keys[@]}"; do
@@ -269,14 +278,68 @@ action_notify() {
   done
   printf "  $(t notify_prompt)"; read_esc || { printf "  $(t cancel)\n"; return; }
   local sel="$REPLY"; case "$sel" in ''|*[!0-9]*) printf "  $(t cancel)\n"; return ;; esac
-  [ "$sel" -ge 1 ] && [ "$sel" -le 5 ] || { printf "  $(t cancel)\n"; return; }
+  [ "$sel" -ge 1 ] && [ "$sel" -le "${#keys[@]}" ] || { printf "  $(t cancel)\n"; return; }
   k="${keys[$((sel-1))]}"; eval "v=\${${k}:-0}"
   [ "$v" = 1 ] && v=0 || v=1
   eval "$k=$v"
-  # 5개 값 전부 notify.conf 에 기록
+  # 값 전부 notify.conf 에 기록
   { for i in "${!keys[@]}"; do eval "printf '%s=%s\n' \"${keys[$i]}\" \"\${${keys[$i]}}\""; done; } > "$DIR/notify.conf"
   daemon_reload
   printf "  %s = %s\n" "$k" "$v"; sleep 1
+}
+
+# 자동승인 설정: approve.conf 에 저장(데몬도 공유), 즉시 반영.
+#   1) 켜기/끄기  2) 범위(권한만/전부)  3) 답변(한 번만/앞으로 묻지 않기)  4) 창별 제외
+action_approve() {
+  echo; printf "  %s\n" "$(t ap_title)"
+  printf "  %s%s%s\n" "$D" "$(t ap_warn)" "$R"
+  printf "    1) [%s] %s\n" "$([ "${AUTO_APPROVE:-0}" = 1 ] && echo ON || echo '  ')" "$(t ap_master)"
+  printf "    2) %s: %s\n" "$(t ap_mode)" \
+    "$([ "${AUTO_APPROVE_MODE:-all}" = all ] && t ap_mode_all || t ap_mode_perm)"
+  printf "    3) %s: %s\n" "$(t ap_prefer)" \
+    "$([ "${AUTO_APPROVE_PREFER:-once}" = always ] && t ap_prefer_alw || t ap_prefer_once)"
+  printf "    4) %s\n" "$(t ap_perwin)"
+  [ -n "${AUTO_APPROVE_FILTER:-}" ] && printf "       %s$(t ap_filter)%s\n" "$D" "$AUTO_APPROVE_FILTER" "$R"
+  [ -n "${AUTO_APPROVE_DENY:-}" ]   && printf "       %s$(t ap_deny)%s\n"   "$D" "$AUTO_APPROVE_DENY" "$R"
+  printf "  $(t ap_prompt)"; read_esc || { printf "  $(t cancel)\n"; return; }
+  local sel="$REPLY"
+  case "$sel" in
+    1) [ "${AUTO_APPROVE:-0}" = 1 ] && AUTO_APPROVE=0 || AUTO_APPROVE=1 ;;
+    2) [ "${AUTO_APPROVE_MODE:-all}" = all ] && AUTO_APPROVE_MODE=permission || AUTO_APPROVE_MODE=all ;;
+    3) [ "${AUTO_APPROVE_PREFER:-once}" = always ] && AUTO_APPROVE_PREFER=once || AUTO_APPROVE_PREFER=always ;;
+    4) approve_perwin; return ;;
+    *) printf "  $(t cancel)\n"; return ;;
+  esac
+  save_approve_conf; daemon_reload
+  printf "  %s = %s / %s / %s\n" "$(t ap_master)" \
+    "$([ "$AUTO_APPROVE" = 1 ] && echo ON || echo OFF)" "$AUTO_APPROVE_MODE" "$AUTO_APPROVE_PREFER"
+  sleep 1
+}
+
+# 창 하나를 자동승인 대상에서 빼거나 되돌린다(자동재개는 그대로 둔다).
+approve_perwin() {
+  printf "  $(t toggle_list)\n"; $T list-windows -t "$TMUX_SESSION" -F '    #{window_name}' 2>/dev/null
+  printf "  $(t ap_win_prompt)"; read_esc || { printf "  $(t cancel)\n"; return; }
+  local wn="$REPLY"
+  [ -z "$wn" ] && { printf "  $(t cancel)\n"; return; }; [ "$wn" = c ] && { printf "  $(t cancel)\n"; return; }
+  if [ -f "$NOAPPROVE_LIST" ] && grep -qxF "$wn" "$NOAPPROVE_LIST"; then
+    grep -vxF "$wn" "$NOAPPROVE_LIST" > "$NOAPPROVE_LIST.tmp" 2>/dev/null; mv "$NOAPPROVE_LIST.tmp" "$NOAPPROVE_LIST"
+    printf "  $(t ap_win_on)\n" "$wn"
+  else
+    echo "$wn" >> "$NOAPPROVE_LIST"; printf "  $(t ap_win_off)\n" "$wn"
+  fi
+  sleep 1
+}
+
+# 자동승인 설정 4개를 approve.conf 에 기록(FILTER/DENY 는 파일을 직접 고치는 값이라
+# 여기서도 현재 값을 그대로 다시 써서 보존한다).
+save_approve_conf() {
+  { printf 'AUTO_APPROVE=%s\n'        "${AUTO_APPROVE:-0}"
+    printf 'AUTO_APPROVE_MODE=%s\n'   "${AUTO_APPROVE_MODE:-all}"
+    printf 'AUTO_APPROVE_PREFER=%s\n' "${AUTO_APPROVE_PREFER:-once}"
+    printf 'AUTO_APPROVE_FILTER=%s\n' "\"${AUTO_APPROVE_FILTER:-}\""
+    printf 'AUTO_APPROVE_DENY=%s\n'   "\"${AUTO_APPROVE_DENY:-}\""
+  } > "$DIR/approve.conf"
 }
 
 if [ "$ONCE" = 1 ]; then draw; echo; exit 0; fi
@@ -295,8 +358,9 @@ while true; do
       a|A) term_normal; action_attach; term_raw ;;
       n|N) term_normal; action_new;    term_raw ;;
       k|K) term_normal; action_kill;   term_raw ;;
-      p|P) term_normal; action_toggle; term_raw ;;
-      t|T) term_normal; action_notify; term_raw ;;
+      p|P) term_normal; action_toggle;  term_raw ;;
+      y|Y) term_normal; action_approve; term_raw ;;
+      t|T) term_normal; action_notify;  term_raw ;;
       l|L) action_lang ;;
     esac
   fi

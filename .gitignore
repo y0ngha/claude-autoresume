@@ -2,8 +2,10 @@
 state/
 .sm/
 disabled.list
+noapprove.list
 lang
 notify.conf
+approve.conf
 *.log
 
 # macOS
