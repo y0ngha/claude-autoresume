@@ -40,7 +40,17 @@ NOAPPROVE_LIST="$_CFG_DIR/noapprove.list"
 RESUME_REGEX="you'?ve hit your session limit|5-hour limit reached|session limit reached|stop and wait for limit to reset"
 # (B) BLOCKED_NOAUTO_REGEX : 차단이며 자동재개 무의미(장기 대기). 감지+알림만.
 #     주간/7일 한도가 여기 해당(리셋이 멀어 이어가도 의미 없음).
-BLOCKED_NOAUTO_REGEX="weekly limit|7-day limit"
+#     한도 종류 라벨은 claude 바이너리(2.1.220)의 매핑에서 그대로 가져왔다:
+#       five_hour:"session limit"            → 5시간, 자동재개 대상(RESUME_REGEX)
+#       seven_day:"weekly limit"             → 7일
+#       seven_day_opus:"Opus limit"          → 7일(모델별)
+#       seven_day_sonnet:"Sonnet limit"      → 7일(모델별)
+#       seven_day_overage_included:"… limit" → 7일(최신 모델명이 들어감. 모델명은 버전마다
+#                                              바뀌므로 이름 대신 '모델명 + limit' 을 넓게 받는다)
+#       overage:"usage credit limit"         → 크레딧 소진
+#     배너는 "You've hit your <라벨>" 로 조합된다. 이 목록에 없으면 classify 가 idle 로
+#     떨어져 알림도 로그도 없이 방치되므로, 7일 계열은 빠짐없이 넣어 둔다.
+BLOCKED_NOAUTO_REGEX="weekly limit|7-day limit|opus limit|sonnet limit|haiku limit|fable [0-9.]+ limit|usage credit limit"
 # (B') ORG_LIMIT_REGEX : 기업(org) 계정 전용. 기업 계정은 '개인 5시간 한도'도 이 문구로
 #     뜨며(리셋 시각이 화면에 없음), 진짜 월 결제 한도인지 5시간 한도인지 문구만으론
 #     구분되지 않는다. 그래서 즉시 차단하지 않고 5시간 뒤 1회 재시도한 뒤(autoresume.sh
@@ -439,11 +449,33 @@ usage_of() {
 # 화면 내용(stdin)에서 'resets <시각> (Zone/City)'을 파싱.
 #   출력: 미래면 epoch(초) / 이미 지났으면 "PASSED" / 못 읽으면 빈값.
 reset_epoch() {
-  local content raw hour min ampm h2 m2 tz tzpfx day epoch now epoch2
+  local content raw hour min ampm h2 m2 tz tzpfx day epoch now epoch2 rel rh rm secs md day2
   content="$(cat)"
+  # (0) 상대 시간형 "resets in 2h 30m" / "resets in 45m".
+  #     claude 는 절대 시각형과 이 형태를 함께 쓴다(바이너리에 'resets in ' 템플릿 존재).
+  #     예전에는 이 형식을 못 읽어 빈값 → '시각 불명' → 리셋 전에 재개를 주입하고,
+  #     실패하면 MIN_RESEND_GAP 마다 반복했다.
+  rel="$(printf '%s' "$content" | grep -oiE 'resets in [0-9]+[hm]([[:space:]]*[0-9]+m)?' | head -1)"
+  if [ -n "$rel" ]; then
+    rh="$(printf '%s' "$rel" | grep -oiE '[0-9]+h' | tr -dc '0-9')"; rh="${rh:-0}"
+    rm="$(printf '%s' "$rel" | grep -oiE '[0-9]+m' | tr -dc '0-9')"; rm="${rm:-0}"
+    secs=$(( 10#$rh * 3600 + 10#$rm * 60 ))
+    [ "$secs" -le 0 ] && { printf 'PASSED'; return 0; }
+    # 5시간 한도의 잔여시간이라기엔 너무 멀면(6시간 초과) 주간 한도 쪽이므로 대기 대상이 아니다.
+    [ "$secs" -gt 21600 ] && { printf 'PASSED'; return 0; }
+    printf '%s' $(( $(date +%s) + secs )); return 0
+  fi
+  # (1) 절대 시각형. 날짜가 앞에 붙는 변형이 있다 — 실물 확인:
+  #     "resets Jul 30 at 3pm (Asia/Seoul)".  예전 정규식은 'resets' 바로 뒤에 시각이
+  #     오는 것만 봐서 이 형태를 통째로 놓쳤다.
   raw="$(printf '%s' "$content" \
-        | grep -oiE 'resets[[:space:]]+(at[[:space:]]+)?[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)?' \
-        | head -1 | grep -oiE '[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)?' | tail -1)"
+        | grep -oiE 'resets[[:space:]]+([A-Za-z]{3,9}[[:space:]]+[0-9]{1,2}[[:space:]]+)?(at[[:space:]]+)?[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)?' \
+        | head -1)"
+  # 날짜 조각("Jul 30")이 있으면 그 날짜를 기준일로 삼는다(없으면 아래에서 오늘로 계산).
+  md="$(printf '%s' "$raw" | grep -oiE '^resets[[:space:]]+[A-Za-z]{3,9}[[:space:]]+[0-9]{1,2}' \
+        | sed -E 's/^[Rr]esets[[:space:]]+//')"
+  # 시각 조각은 맨 뒤 것을 쓴다(날짜의 일(日) 숫자가 먼저 잡히므로 tail -1).
+  raw="$(printf '%s' "$raw" | grep -oiE '[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)?' | tail -1)"
   raw="$(printf '%s' "$raw" | tr -d '[:space:]' | tr 'a-z' 'A-Z')"
   [ -z "$raw" ] && return 0
   hour="$(printf '%s' "$raw" | grep -oE '^[0-9]{1,2}')"; [ -z "$hour" ] && return 0
@@ -458,6 +490,12 @@ reset_epoch() {
   tz="$(printf '%s' "$content" | grep -oE '\([A-Za-z]+/[A-Za-z_]+\)' | head -1 | tr -d '()')"
   tzpfx=""; [ -n "$tz" ] && tzpfx="TZ=$tz"
   day="$(env $tzpfx date +%Y-%m-%d)"
+  # 배너에 날짜가 명시돼 있으면("resets Jul 30 at 3pm") 그 날짜를 쓴다. 연도는 화면에
+  # 없으므로 올해로 본다(연말 경계에서만 어긋나고, 그때는 아래 6시간 창에서 PASSED 로 빠진다).
+  if [ -n "$md" ]; then
+    day2="$(env $tzpfx date -j -f "%b %d %Y" "$md $(env $tzpfx date +%Y)" +%Y-%m-%d 2>/dev/null)"
+    [ -n "$day2" ] && day="$day2"
+  fi
   epoch="$(env $tzpfx date -j -f "%Y-%m-%d %H:%M" "$day $h2:$m2" +%s 2>/dev/null)"
   [ -z "$epoch" ] && return 0
   now="$(date +%s)"
