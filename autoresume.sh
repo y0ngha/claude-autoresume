@@ -127,7 +127,7 @@ approve_window() {
   # 계속 0으로 돌아간다(= 오탐일 때 입력창에 숫자가 무한히 쌓인다). 선택지 목록은 판정이
   # 틀려 대화상자가 아닌 본문을 잡은 경우 그대로 남아 있으므로, 그때만 카운트가 쌓인다.
   af="$STATE/${TMUX_SESSION}-${idx}.aptry"
-  h="$(printf '%s' "$content" | approve_options | cksum | awk '{print $1}')"
+  h="$(printf '%s' "$content" | approve_hash)"
   # 상태파일이 없거나 비었을 때도 awk 가 '한 줄'을 보도록 개행을 붙인다(빈 문자열이면
   # awk 는 아예 출력을 안 해 pc/pt 가 빈 값이 되고, 그 뒤 정수 비교가 깨진다).
   prev="$(cat "$af" 2>/dev/null || echo)"
@@ -153,7 +153,7 @@ approve_window() {
   # 않은 것 → 실패로 세고, APPROVE_MAX_TRIES 를 넘기면 그 화면은 사람에게 넘긴다.
   sleep 1.5
   after="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$APPROVE_CAPTURE_LINES")"
-  ah="$(printf '%s' "$after" | approve_options | cksum | awk '{print $1}')"
+  ah="$(printf '%s' "$after" | approve_hash)"
   if [ "$ah" = "$h" ] && [ "$(classify_deep "$(printf '%s\n' "$after" | tail -n "$CAPTURE_LINES")" "$after")" = permission ]; then
     pc=$((pc+1))
   else
