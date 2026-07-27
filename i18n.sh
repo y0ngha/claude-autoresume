@@ -109,7 +109,10 @@ _msg_en() { case "$1" in
   ntf_permission_body)  printf "Window '%%s' is asking permission and cannot continue on its own" ;;
   # ── daemon log ──
   lg_state)       printf "%%s [%%s] %%s (window='%%s')" ;;
-  lg_menu)        printf "🟡 limit menu → auto-selected 'Stop and wait': %%s (window='%%s')" ;;
+  lg_menu)        printf "🟡 limit menu → confirmed 'Stop and wait' (option %%s): %%s (window='%%s')" ;;
+  lg_menu_nopick) printf "⚠️ limit menu found but 'Stop and wait' option number unreadable: %%s (window='%%s')" ;;
+  lg_menu_miss)   printf "⚠️ pressed %%s but the cursor did not land on 'Stop and wait' — not confirming: %%s (window='%%s')" ;;
+  lg_menu_stuck)  printf "⚠️ limit menu still open after confirming option %%s: %%s (window='%%s') — manual check needed" ;;
   lg_start)       printf 'watcher started (session=%%s, interval=%%ss, gap=%%ss)' ;;
   lg_no_session)  printf "session '%%s' not found — waiting" ;;
   lg_idle)        printf "✅ %%s idle transition (finished/awaiting input): window='%%s'" ;;
@@ -246,7 +249,10 @@ _msg_ko() { case "$1" in
   ntf_permission_title) printf 'Claude: 승인 대기' ;;
   ntf_permission_body)  printf "'%%s' 권한을 묻는 중 — 눌러주기 전엔 진행 못 함" ;;
   lg_state)       printf "%%s [%%s] %%s (window='%%s')" ;;
-  lg_menu)        printf "🟡 한도 메뉴 → 'Stop and wait' 자동선택: %%s (window='%%s')" ;;
+  lg_menu)        printf "🟡 한도 메뉴 → 'Stop and wait'(%%s번) 확정: %%s (window='%%s')" ;;
+  lg_menu_nopick) printf "⚠️ 한도 메뉴는 찾았으나 'Stop and wait' 번호를 못 읽음: %%s (window='%%s')" ;;
+  lg_menu_miss)   printf "⚠️ %%s번을 눌렀지만 커서가 'Stop and wait' 로 안 감 — 확정 보류: %%s (window='%%s')" ;;
+  lg_menu_stuck)  printf "⚠️ %%s번 확정 후에도 한도 메뉴가 남아 있음: %%s (window='%%s') — 수동 확인 필요" ;;
   lg_start)       printf 'watcher 시작 (session=%%s, interval=%%ss, gap=%%ss)' ;;
   lg_no_session)  printf "세션 '%%s' 없음 — 대기" ;;
   lg_idle)        printf "✅ %%s 유휴 전환(완료/입력대기): window='%%s'" ;;

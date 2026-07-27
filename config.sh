@@ -50,12 +50,29 @@ BLOCKED_NOAUTO_REGEX="weekly limit|7-day limit"
 ORG_LIMIT_REGEX="hit your org'?s monthly spend limit|monthly spend limit"
 # (C) IGNORE_REGEX : 차단 아닌 예고성 경고 → 무시. 예) "You've used 97% of ..."
 IGNORE_REGEX="used [0-9]{1,3}% of|approaching"
-# (D) 한도 도달 시 뜨는 대화형 선택 메뉴 → 데몬이 "Stop and wait for limit to reset"(1번)
-#     자동 선택. 단, 선택 후에도 문구가 남을 수 있어 '활성 메뉴'일 때만 잡아야 함
-#     (그래야 선택 뒤 리셋 지나면 CONTINUE_PROMPT 주입으로 실제 재개가 진행됨).
-#     LIMIT_MENU_OPT  : 옵션 문구,  LIMIT_MENU_ACTIVE : 활성 메뉴에만 있는 확정 프롬프트
-LIMIT_MENU_OPT="stop and wait for limit to reset"
-LIMIT_MENU_ACTIVE="enter to confirm|esc to cancel|❯ *1\."
+# (D) 한도 도달 시 뜨는 대화형 선택 메뉴 → 데몬이 "Stop and wait…" 선택지를 자동 선택.
+#     선택 후에도 문구가 남을 수 있어 '활성 메뉴'일 때만 잡아야 한다(그래야 선택 뒤
+#     리셋이 지나면 CONTINUE_PROMPT 주입으로 실제 재개가 이어진다).
+#     아래 값들은 claude 바이너리(2.1.220)의 메뉴 구현에서 확인한 것이다:
+#       options: {label: usage_based ? "Stop" : "Stop and wait for limit to reset"}
+#                {label:"Upgrade your plan"} {label:`Add funds to continue with …`} …
+#       title:   "What do you want to do?"
+#       순서:    기능플래그에 따라 'Stop' 이 첫 번째일 수도 마지막일 수도 있다
+#                → 위치로 고르면 안 되고 반드시 라벨로 찾아야 한다(limit_menu_pick).
+LIMIT_MENU_OPT="stop and wait for limit to reset|stop"
+# 선택지 '줄'로 렌더링된 형태만 인정한다. 커서(❯)와 번호는 둘 다 있을 수도, 없을 수도 있다
+# (rate limit 메뉴는 번호가 붙지만, 기업 결제 한도 메뉴는 '❯ 라벨' 로만 그린다).
+# 라벨이 줄의 전부여야 한다 — 그래야 대화 본문에 같은 문구가 섞인 산문이 안 걸린다.
+LIMIT_MENU_OPTLINE="^[[:space:]]*(❯[[:space:]]*)?([0-9]{1,2}\.[[:space:]]+)?($LIMIT_MENU_OPT)[[:space:]]*$"
+# 그 선택지에 커서가 '올라가 있는' 상태. 번호키를 누른 뒤 확정(Enter)을 보내도 되는지
+# 판단하는 데 쓴다. 커서가 목표에 안 갔는데 Enter 를 보내면 엉뚱한 선택지가 확정된다.
+LIMIT_MENU_SELECTED="^[[:space:]]*❯[[:space:]]*([0-9]{1,2}\.[[:space:]]+)?($LIMIT_MENU_OPT)[[:space:]]*$"
+# 메뉴가 '지금 열려 있음'을 뒷받침하는 신호. 둘 중 하나만 있으면 된다.
+#   · 제목 "What do you want to do?" : 바이너리의 메뉴 구현에서 확인
+#   · 하단 "Enter to confirm"         : 선택 대화상자 공통 안내(폴더 신뢰 화면에서 실물 확인)
+# 넓게 잡아도 안전한 이유: 오탐 차단은 LIMIT_MENU_OPTLINE(라벨이 줄의 전부)이 맡는다.
+# 좁히면 UI 문구가 하나만 바뀌어도 메뉴를 통째로 놓치므로, 여기서는 넓히는 쪽이 옳다.
+LIMIT_MENU_ACTIVE="what do you want to do\?|enter to confirm"
 #     LIMIT_MENU_LABELS : 한도 메뉴의 '선택지 라벨' 모음. 승인 경로(match_permission)가
 #     이 메뉴를 건드리지 않도록 막는 데 쓴다. LIMIT_MENU_OPT 한 문구만 보면 문구가 다른
 #     한도 메뉴(usage_based 계정의 'Stop', 업그레이드·크레딧 안내)가 그대로 통과해
@@ -235,12 +252,21 @@ match_blocked()    { grep -iE "$BLOCKED_NOAUTO_REGEX" 2>/dev/null | grep -ivE "$
 match_orglimit()   { grep -iE "$ORG_LIMIT_REGEX"      2>/dev/null | grep -ivE "$IGNORE_REGEX" | grep -q .; }
 match_background() { grep -qiE "$BACKGROUND_REGEX" 2>/dev/null; }
 match_working()    { grep -qiE "$WORKING_REGEX" 2>/dev/null; }
-# 활성 한도 메뉴: 옵션 문구 + 확정 프롬프트가 함께 있을 때만 참(선택 후 잔여문구 제외)
+# 활성 한도 메뉴인가. 둘 다 만족해야 참이다:
+#   (1) 'Stop…' 선택지가 '선택지 줄'로 렌더링돼 있다(라벨이 줄의 전부)
+#       → 대화 본문에 같은 문구가 섞인 산문이나 슬래시 명령 팝업은 여기서 걸러진다
+#   (2) 메뉴 제목이나 확정 안내가 화면에 있다 → 이미 닫히고 흔적만 남은 화면 제외
+# 커서(❯) 유무는 조건에 넣지 않는다. 화면 하단 입력 프롬프트도 '❯ ' 로 시작해서 사실상
+# 항상 참이 되고(무의미), 기업 결제 한도 메뉴는 번호 없이 '❯ 라벨' 로 그려 형태도 다르다.
 match_limit_menu() {
   local c; c="$(cat)"
-  printf '%s' "$c" | grep -qiE "$LIMIT_MENU_OPT" \
-    && printf '%s' "$c" | grep -qiE "$LIMIT_MENU_ACTIVE"
+  printf '%s' "$c" | grep -qiE "$LIMIT_MENU_OPTLINE" \
+    && printf '%s' "$c" | _flatten | grep -qiE "$LIMIT_MENU_ACTIVE"
 }
+
+# 한도 메뉴에서 'Stop…' 선택지에 커서가 올라가 있나(= 지금 Enter 를 보내면 그게 확정되나).
+# 번호키를 누른 뒤 이걸로 확인하고 나서야 확정을 보낸다.
+match_limit_selected() { grep -qiE "$LIMIT_MENU_SELECTED" 2>/dev/null; }
 
 # ── 승인 대기 대화상자 판정/파싱 ────────────────────────────────────────────
 # 화면(stdin)에서 번호 선택지 목록을 뽑아 "번호|라벨" 로 출력.
@@ -263,6 +289,18 @@ approve_options() {
                  END { for (i=1;i<=n;i++) print last[order[i]] }' \
     | sort -t'|' -k1,1n \
     | awk -F'|' 'BEGIN{want=1} $1==want { print; want++ }'
+}
+
+# 활성 한도 메뉴에서 'Stop…' 선택지의 번호를 출력(못 찾으면 빈값).
+#   위치가 아니라 라벨로 찾는다. 예전에는 'Up Up 으로 최상단'이라는 위치 가정에 기대
+#   화살표를 보냈는데, 바이너리를 보면 그 메뉴의 선택지 순서는 기능플래그에 따라 뒤집힌다
+#   ('Stop' 이 첫 번째일 수도 마지막일 수도 있다). 위치 가정 자체가 틀렸던 것이다.
+#   라벨 전체가 그 문구여야 인정한다($LIMIT_MENU_OPT 는 OR 를 품고 있어 괄호로 묶는다).
+#   번호가 안 붙는 메뉴(기업 결제 한도)는 여기서 빈값이 나오고, 데몬은 키를 보내지 않는다.
+#   선택지 파싱은 approve_options 를 그대로 쓴다(1..N 연속 번호만 인정하므로 본문 텍스트가
+#   섞여 들어오지 않는다). 이 함수는 그래서 approve_options 아래에 둔다.
+limit_menu_pick() {
+  approve_options | grep -iE "^[0-9]{1,2}\|[[:space:]]*($LIMIT_MENU_OPT)[[:space:]]*$" | head -1 | cut -d'|' -f1
 }
 
 # 지금 화면에 '열려 있는' 선택 대화상자가 있나. 커서 줄 + (질문 문구 | 하단 안내) 둘 다 필요.

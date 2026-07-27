@@ -189,6 +189,44 @@ approve_scan() {
   done < <(_t 8 tmux list-windows -t "$TMUX_SESSION" -F '#{window_index}' 2>/dev/null)
 }
 
+# 활성 한도 메뉴에서 "Stop and wait for limit to reset" 을 골라 확정한다.
+#   $1=target $2=window_name $3=화면내용
+# 한 단계씩 확인하며 나아간다. 예전에는 'Up Up + Enter' 를 한 번에 쏘고 곧바로 성공으로
+# 기록했는데, 메뉴가 아닌 화면에 그게 들어가면 화살표는 입력창의 히스토리 탐색이 되고
+# 뒤이은 Enter 가 그 명령을 실행해 버렸다(한도 화면에서 /rate-limit 이 돌아간 사고).
+# 그래서 (1) 라벨로 찾은 번호키를 누르고 (2) 화면을 다시 읽어 목표 선택지가 실제로 골라졌는지
+# 확인한 뒤에야 (3) 확정을 보낸다. 커서가 목표에 가 있지 않으면 확정을 보내지 않고 사람에게
+# 넘긴다 — 엉뚱한 선택지를 확정하느니 메뉴를 그대로 두는 편이 낫다.
+select_limit_menu() {
+  local target="$1" name="$2" content="$3" pick after
+  pick="$(printf '%s' "$content" | limit_menu_pick)"
+  if [ -z "$pick" ]; then
+    log "$(tf lg_menu_nopick "$target" "$name")"; return 0
+  fi
+  if ! _t 8 tmux send-keys -t "$target" -l "$pick"; then
+    log "$(tf lg_inject_fail "$target" "$name")"; return 0
+  fi
+  sleep 1.5
+  after="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
+  # 메뉴가 사라졌으면 번호키만으로 확정된 것 → 여기서 끝. Enter 를 덧붙이면 그건 입력창으로
+  # 들어가므로 절대 보내지 않는다.
+  if ! printf '%s' "$after" | match_limit_menu; then
+    log "$(tf lg_menu "$pick" "$target" "$name")"; return 0
+  fi
+  # 메뉴가 남아 있다 = 번호키가 이동만 시키는 변형. 커서가 목표 선택지에 갔을 때만 확정한다.
+  if ! printf '%s' "$after" | match_limit_selected; then
+    log "$(tf lg_menu_miss "$pick" "$target" "$name")"; return 0
+  fi
+  _t 8 tmux send-keys -t "$target" Enter
+  sleep 1.5
+  after="$(_t 8 tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$CAPTURE_LINES")"
+  if printf '%s' "$after" | match_limit_menu; then
+    log "$(tf lg_menu_stuck "$pick" "$target" "$name")"   # 확정했는데도 안 닫힘 → 사람 확인
+  else
+    log "$(tf lg_menu "$pick" "$target" "$name")"
+  fi
+}
+
 scan_once() {
   rotate_log
   if ! _t 8 tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
@@ -301,10 +339,7 @@ scan_once() {
       mlast="$(_num "$mf")"
       if [ $(( now - mlast )) -ge "$MIN_RESEND_GAP" ]; then
         echo "$now" > "$mf"
-        _t 8 tmux send-keys -t "$target" Up Up      # 커서를 최상단(1번)으로
-        sleep 0.3
-        _t 8 tmux send-keys -t "$target" Enter      # 확정
-        log "$(tf lg_menu "$target" "$name")"
+        select_limit_menu "$target" "$name" "$content"
       fi
       continue
     fi
