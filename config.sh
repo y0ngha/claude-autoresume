@@ -56,6 +56,13 @@ IGNORE_REGEX="used [0-9]{1,3}% of|approaching"
 #     LIMIT_MENU_OPT  : 옵션 문구,  LIMIT_MENU_ACTIVE : 활성 메뉴에만 있는 확정 프롬프트
 LIMIT_MENU_OPT="stop and wait for limit to reset"
 LIMIT_MENU_ACTIVE="enter to confirm|esc to cancel|❯ *1\."
+#     LIMIT_MENU_LABELS : 한도 메뉴의 '선택지 라벨' 모음. 승인 경로(match_permission)가
+#     이 메뉴를 건드리지 않도록 막는 데 쓴다. LIMIT_MENU_OPT 한 문구만 보면 문구가 다른
+#     한도 메뉴(usage_based 계정의 'Stop', 업그레이드·크레딧 안내)가 그대로 통과해
+#     '1번 승인'이 눌린다. 라벨 목록은 claude 바이너리(2.1.220)의 메뉴 구현에서 가져왔다.
+#     검사 대상은 선택지 라벨뿐이다 — 화면 전체를 보면 본문에 'stop' 한 단어가 있다는
+#     이유로 멀쩡한 권한 요청까지 막힌다. 라벨 전체와 맞아야 하는 것은 ^…$ 로 묶는다.
+LIMIT_MENU_LABELS="stop and wait for limit to reset|^stop$|^upgrade your plan$|^add funds to continue with|^switch to usage|^ask your admin for more usage|^(upgrade|switch) to team plan$|^wait for limit to reset$|continue with a different model|switch to a different model"
 
 # 백그라운드 작업 진행 중 신호 → '유휴' 아닌 '🔵 백그라운드'
 #   · "N shells still running" / "· N shell"        : 백그라운드 셸
@@ -87,7 +94,11 @@ BACKGROUND_REGEX="[0-9]+ shells? still running|· [0-9]+ shell|running in the ba
 APPROVE_CURSOR="^[[:space:]]*❯[[:space:]]*[0-9]{1,2}\."
 # APPROVE_ASK    : 도구 권한 요청 특유의 질문 문구. mode=permission 일 때 이것만 인정한다.
 #                  'Ready to submit'은 multiSelect 질문의 2단계(제출 확인) 화면.
-APPROVE_ASK="do you want to (proceed|create|make this edit|allow|use this api key|continue)|would you like to proceed|ready to submit your answers"
+#                  'quick safety check…' 는 새 폴더에서 처음 뜨는 신뢰 확인 화면이다. 실물:
+#                    "Quick safety check: Is this a project you created or one you trust? …"
+#                    "❯ 1. Yes, I trust this folder / 2. No, exit"
+#                  mode=permission 은 이 목록만 인정하므로, 없으면 새 폴더에서 세션이 선다.
+APPROVE_ASK="do you want to (proceed|create|make this edit|allow|use this api key|continue)|would you like to proceed|ready to submit your answers|quick safety check|is this a project you created"
 # APPROVE_FOOTER : 선택 대화상자 공통 하단 안내. mode=all 일 때 AskUserQuestion·폴더신뢰
 #                  같이 질문 문구가 자유로운 대화상자까지 잡기 위한 보조 증거.
 #                  'press n to add notes'는 선택지에 미리보기 패널이 붙는 질문의 하단 안내다.
@@ -214,6 +225,11 @@ esac
 NEW_SESSION_MENU=( "claude" )
 
 # ── 공용 판정 헬퍼 (stdin = 화면 내용) ──────────────────────────────────────
+# 화면을 한 줄로 접는다(줄바꿈·연속 공백 → 공백 하나). 창이 좁으면 안내 문구가 그대로
+# 줄바꿈돼 줄 단위 grep 이 빗나가므로, '문구가 있나' 류 판정은 이걸 통과시킨 뒤에 한다.
+# 줄 시작 앵커가 필요한 판정(APPROVE_CURSOR, 선택지 파싱)과 줄 번호로 위치를 비교하는
+# approve_is_live 는 원문을 그대로 써야 한다.
+_flatten() { tr '\n' ' ' | tr -s ' '; }
 match_resume()     { grep -iE "$RESUME_REGEX"         2>/dev/null | grep -ivE "$IGNORE_REGEX" | grep -q .; }
 match_blocked()    { grep -iE "$BLOCKED_NOAUTO_REGEX" 2>/dev/null | grep -ivE "$IGNORE_REGEX" | grep -q .; }
 match_orglimit()   { grep -iE "$ORG_LIMIT_REGEX"      2>/dev/null | grep -ivE "$IGNORE_REGEX" | grep -q .; }
@@ -252,15 +268,19 @@ approve_options() {
 # 지금 화면에 '열려 있는' 선택 대화상자가 있나. 커서 줄 + (질문 문구 | 하단 안내) 둘 다 필요.
 #   mode=permission 이면 도구 권한 질문(APPROVE_ASK)만 인정한다.
 match_permission() {
-  local c; c="$(cat)"
+  local c flat; c="$(cat)"
   printf '%s' "$c" | grep -qE "$APPROVE_CURSOR" || return 1
   # 한도 메뉴는 한도 로직이 전담한다. 여기서 손대면 'Continue with a different model' 같은
   # 선택지를 긍정으로 오인해 모델을 바꿔 버릴 수 있다(classify 가 먼저 걸러 주지만,
   # 메뉴 판정이 어긋난 경우까지 대비해 여기서도 막는다).
-  printf '%s' "$c" | grep -qiE "$LIMIT_MENU_OPT" && return 1
-  printf '%s' "$c" | grep -qiE "$APPROVE_ASK" && return 0
+  printf '%s' "$c" | approve_options | cut -d'|' -f2- | grep -qiE "$LIMIT_MENU_LABELS" && return 1
+  # 문구 판정은 화면을 한 줄로 접어서 한다. 좁은 창(78컬럼)에서는 안내 문구가 그대로
+  # 줄바꿈되는데("… Would you like to" / "proceed?"), 줄 단위 grep 은 그걸 못 잡는다.
+  # 실제로 mode=permission 에서 계획 승인 대화상자가 통째로 idle 로 새어 세션이 방치됐다.
+  flat="$(printf '%s' "$c" | _flatten)"
+  printf '%s' "$flat" | grep -qiE "$APPROVE_ASK" && return 0
   [ "${AUTO_APPROVE_MODE:-all}" = all ] || return 1
-  printf '%s' "$c" | grep -qiE "$APPROVE_FOOTER"
+  printf '%s' "$flat" | grep -qiE "$APPROVE_FOOTER"
 }
 
 # 화면(stdin)에서 누를 선택지 번호를 출력. 누르면 안 되면 빈값.
@@ -358,7 +378,7 @@ classify_deep() {  # $1=얕은 화면, $2=깊은 화면
   local s; s="$(printf '%s' "$1" | classify)"
   case "$s" in
     idle|background)
-      if printf '%s' "$1" | grep -qiE "$APPROVE_FOOTER|$APPROVE_ASK" \
+      if printf '%s' "$1" | _flatten | grep -qiE "$APPROVE_FOOTER|$APPROVE_ASK" \
          && printf '%s' "$2" | approve_is_live \
          && printf '%s' "$2" | match_permission; then printf permission; return 0; fi ;;
   esac
