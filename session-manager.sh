@@ -78,7 +78,13 @@ draw() {
 
   local n=0 working=0 bg=0 limited=0 blocked=0 idle=0 perm=0
   while IFS=$'\t' read -r idx name; do
-    [ -z "$idx" ] && continue
+    # 인덱스가 숫자일 때만 진행한다. 데몬(autoresume.sh)이 쓰는 것과 같은 가드다.
+    # 비어있는지만 보면, idx 에 엉뚱한 값이 들어왔을 때 그 값이 그대로 상태파일 이름이 되어
+    # (.sm/<쓰레기>.hash) 파일이 쌓이고, 그 파일을 다시 읽은 lastchg 가 숫자가 아니라
+    # `$((now-lastchg))` 가 산술 오류로 터지면서 화면이 깨진다. 실제로 .sm 에 ANSI 코드가
+    # 박힌 파일이 93개까지 쌓여 있었다. 오염 경로 자체는 아직 못 좁혔지만, 숫자가 아닌
+    # 인덱스로는 아무것도 만들지 않으면 증상과 2차 피해가 모두 사라진다.
+    case "$idx" in ''|*[!0-9]*) continue ;; esac
     n=$((n+1))
     local cur curdeep curhash hashf chgf prevhash lastchg status inj sf prof pbadge usage ustr dis
     # 데몬과 같은 두 창 구성: cur(얕은 창)는 한도·사용량 판정용, curdeep(깊은 창)은 승인
