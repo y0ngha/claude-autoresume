@@ -492,8 +492,11 @@ reset_epoch() {
   day="$(env $tzpfx date +%Y-%m-%d)"
   # 배너에 날짜가 명시돼 있으면("resets Jul 30 at 3pm") 그 날짜를 쓴다. 연도는 화면에
   # 없으므로 올해로 본다(연말 경계에서만 어긋나고, 그때는 아래 6시간 창에서 PASSED 로 빠진다).
+  # LC_TIME=C 가 필요하다: 배너의 월 이름은 항상 영문("Jul")인데, 한국어 로케일에서는
+  # BSD date 의 %b 가 그걸 못 읽어 변환이 통째로 실패한다(그러면 날짜를 무시하고 오늘로
+  # 계산해 버린다). 로케일 강제는 이 한 줄에만 걸어 다른 출력에는 영향을 주지 않는다.
   if [ -n "$md" ]; then
-    day2="$(env $tzpfx date -j -f "%b %d %Y" "$md $(env $tzpfx date +%Y)" +%Y-%m-%d 2>/dev/null)"
+    day2="$(env $tzpfx LC_TIME=C date -j -f "%b %d %Y" "$md $(env $tzpfx date +%Y)" +%Y-%m-%d 2>/dev/null)"
     [ -n "$day2" ] && day="$day2"
   fi
   epoch="$(env $tzpfx date -j -f "%Y-%m-%d %H:%M" "$day $h2:$m2" +%s 2>/dev/null)"
